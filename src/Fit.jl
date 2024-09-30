@@ -89,7 +89,7 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
         scatter!(ax, Params[:, i], chi2)
         scatter!(ax, Params[findmin(chi2)[2], i], findmin(chi2)[1], marker = :star5, markersize = 20)
         ylims!(minimum(chi2) * 0.9, minimum(chi2) * 2.0)
-        xlims!(minimum(Params[:,i])*0.9, maximum(Params[:,i])*1.1)
+        xlims!(minimum(Params[:,i])*0.9, maximum(Params[:,i])*3.0)
     end
     save(fig_name*"_params.png", f)
     
