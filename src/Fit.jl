@@ -67,9 +67,9 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
         header.insert(0, "ID")
         df = pd.DataFrame(data, columns=header,)
         df["ID"] = df["ID"].astype(int)
-        df.to_csv(file_name*".csv", sep='\t')
+        df.to_csv(file_name+".csv", sep='\t')
     """ 
-    df = CSV.read(file_name+".csv", DataFrame)
+    df = CSV.read(file_name*".csv", DataFrame)
     
     idx = df[!, 2];
     Params = df[!, 3:end-1];
