@@ -23,7 +23,7 @@ warnings.filterwarnings(action='once')
 import pandas as pd
 
 
-def Restart(interval):
+def Restart(interval, file_name):
     """ Restart Bayesian Optimization from the same directory if possible. 
 
     Args:
@@ -34,8 +34,8 @@ def Restart(interval):
         y_set   : Set of evaluated Objective function (negatie of loss fucntion).
         idx_set : Set of indices corresponding to x and y_set
     """
-    if os.path.isfile("Bopt_Log.csv"): 
-        df_read = pd.read_csv("Bopt_Log.csv", sep="\t", index_col=0)
+    if os.path.isfile(file_name+".csv"): 
+        df_read = pd.read_csv(file_name+".csv", sep="\t", index_col=0)
         D = df_read.to_numpy()
         idx_set = np.vstack([i for i in D[:,0]])
         y_set = np.vstack([i for i in D[:,-1]])
