@@ -1,6 +1,6 @@
 
 
-function Fit(Objective, interval, max_iter)
+function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "chi2")
     DIR = @__DIR__
     @pyinclude(DIR*"/Bopt.py")
     py"""
@@ -67,6 +67,30 @@ function Fit(Objective, interval, max_iter)
         header.insert(0, "ID")
         df = pd.DataFrame(data, columns=header,)
         df["ID"] = df["ID"].astype(int)
-        df.to_csv("Bopt_Log.csv", sep='\t')
+        df.to_csv(file_name*".csv", sep='\t')
     """ 
+    df = CSV.read(file_name+".csv", DataFrame)
+    
+    idx = df[!, 2];
+    Params = df[!, 3:end-1];
+    chi2 = -1 * df[!, end];
+    
+    f = Figure();
+    ax = Axis(f[1, 1], ylabel = "χ² (a.u)", xlabel = "Idx", xlabelsize = 18, ylabelsize = 18)
+    scatter!(ax, idx, chi2)
+    scatter!(ax, findmin(chi2)[2], findmin(chi2)[1], marker = :star5, markersize = 20)
+    ax.title = "Minimum ID = $(findmin(chi2)[2])"
+    xlims!(0, maximum(idx))
+
+    save(fig_name*"_idx.png", f)
+    f = Figure(size=(1400, 400));
+    for i in 1:size(Params)[2]
+        ax = Axis(f[1, i], title = "Best value = $(Params[findmin(chi2)[2], i])")
+        scatter!(ax, Params[:, i], chi2)
+        scatter!(ax, Params[findmin(chi2)[2], i], findmin(chi2)[1], marker = :star5, markersize = 20)
+        ylims!(minimum(chi2) * 0.9, minimum(chi2) * 2.0)
+        xlims!(minimum(Params[:,i])*0.9, maximum(Params[:,i])*1.1)
+    end
+    save(fig_name*"_params.png", f)
+    
 end
