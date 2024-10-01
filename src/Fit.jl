@@ -23,7 +23,7 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
         n_restarts_optimizer=30  
     )
     
-    X, y, idx_list = Restart(bounds, file_name)
+    X, y, idx_list = Restart(bounds, $file_name)
     start = int(idx_list[-1][0]) + 1
 
     if start == 1:
