@@ -97,7 +97,7 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
 
     best_so_far = np.argmax(y)
     Params_best = X[best_so_far]
-    md, std = surrogate(GP_model, Params_best.T)
+    md, std = surrogate(GP_model, X)
     print(md)
     print(std)
     
