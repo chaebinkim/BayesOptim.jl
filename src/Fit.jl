@@ -69,29 +69,34 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
         df = pd.DataFrame(data, columns=header,)
         df["ID"] = df["ID"].astype(int)
         df.to_csv($file_name+".csv", sep='\t')
-    """ 
-    df = CSV.read(file_name*".csv", DataFrame)
-    
-    idx = df[!, 2];
-    Params = df[!, 3:end-1];
-    chi2 = -1 * df[!, end];
-    
-    f = Figure();
-    ax = Axis(f[1, 1], ylabel = "χ² (a.u)", xlabel = "Idx", xlabelsize = 18, ylabelsize = 18)
-    scatter!(ax, idx, chi2)
-    scatter!(ax, findmin(chi2)[2], findmin(chi2)[1], marker = :star5, markersize = 20)
-    ax.title = "Minimum ID = $(findmin(chi2)[2])"
-    xlims!(0, maximum(idx))
 
-    save(fig_name*"_idx.png", f)
-    f = Figure(size=(1400, 400));
-    for i in 1:size(Params)[2]
-        ax = Axis(f[1, i], title = "Best value = $(Params[findmin(chi2)[2], i])")
-        scatter!(ax, Params[:, i], chi2)
-        scatter!(ax, Params[findmin(chi2)[2], i], findmin(chi2)[1], marker = :star5, markersize = 20)
-        ylims!(minimum(chi2) * 0.9, minimum(chi2) * 2.0)
-        xlims!(minimum(Params[:,i])*0.9, maximum(Params[:,i])*3.0)
-    end
-    save(fig_name*"_params.png", f)
+        fig, ax = plt.subplots(layout = 'constrained')
+        ax.scatter(data[:,0]+1, -data[:,-1], s = 70)
+        ax.scatter(np.argmin(-data[:,-1])+1, np.min(-data[:,-1]), marker = '*', s = 200)
+        ax.set_xlabel('Idx', fontsize = 15)
+        ax.set_ylabel(r'$\chi^2$', fontsize = 15)
+        ax.set_title('Minimum is Idx = {}'.format(np.argmin(-data[:,-1])+1), fontsize= 20)
+        ax.grid(True)
+        ax.set_axisbelow(True)
+        plt.show()
+        fig.savefig($fig_name+"_vs_Idx.png")
+        
+        
+        fig, axs = plt.subplots(1, X.shape[1], figsize = (3*X.shape[1], 3), layout = 'constrained')
+        for i in range(0, X.shape[1]):
+            axs[i].scatter(data[:,i+1], -data[:,-1])
+            axs[i].scatter(data[np.argmin(-data[:,-1]), i+1], np.min(-data[:,-1]), marker = '*', s = 200)
+            axs[i].set_xlabel('Idx', fontsize = 10)
+            axs[i].set_ylabel(r'$\chi^2$', fontsize = 10)
+            axs[i].set_title('Min at {}'.format(data[np.argmin(-data[:,-1]), i].round(decimals = 5)), fontsize= 10)
+            axs[i].grid(True)
+            axs[i].set_axisbelow(True)
+        
+        fig.align_labels()
+        
+        plt.show()
+        fig.savefig($fig_name+"_vs_params.png")
+    
+    """ 
     
 end
