@@ -12,7 +12,7 @@ import os.path
 import math
 import numpy as np
 import scipy
-import matplotlib as plt
+import matplotlib.pyplot as plt
 
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
