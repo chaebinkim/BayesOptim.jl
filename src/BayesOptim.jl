@@ -2,7 +2,9 @@ module BayesOptim
 using Pkg
 # Pkg.build("PyCall") 
 using PyCall
-using CSV, CairoMakie, DataFrames
+import CSV 
+import CairoMakie
+import DataFrames
 
 include("SafetyChecks.jl")
 include("Fit.jl")
