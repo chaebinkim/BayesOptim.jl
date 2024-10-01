@@ -29,7 +29,7 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
     if start == 1:
         print("Initial Run")
         idx_list = np.array([start])
-        X = np.vstack([np.random.uniform(low=bounds[p][0], high=bounds[p][1], size=50-len(bounds)) for p in bounds]).T
+        X = np.vstack([np.random.uniform(low=bounds[p][0], high=bounds[p][1]) for p in bounds]).T
         X = X.round(decimals = 5, out = None)
         params ={"ID":1}
         for p,i in zip(bounds, range(len(bounds))):
