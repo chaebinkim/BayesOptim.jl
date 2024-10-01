@@ -71,14 +71,13 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
         df.to_csv($file_name+".csv", sep='\t')
 
         fig, ax = plt.subplots(layout = 'constrained')
-        ax.scatter(data[:,0]+1, -data[:,-1], s = 70)
+        ax.scatter(data[:,0], -data[:,-1], s = 70)
         ax.scatter(np.argmin(-data[:,-1])+1, np.min(-data[:,-1]), marker = '*', s = 200)
         ax.set_xlabel('Idx', fontsize = 15)
         ax.set_ylabel(r'$\chi^2$', fontsize = 15)
         ax.set_title('Minimum is Idx = {}'.format(np.argmin(-data[:,-1])+1), fontsize= 20)
         ax.grid(True)
         ax.set_axisbelow(True)
-        plt.show()
         fig.savefig($fig_name+"_vs_Idx.png")
         
         
@@ -86,15 +85,14 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
         for i in range(0, X.shape[1]):
             axs[i].scatter(data[:,i+1], -data[:,-1])
             axs[i].scatter(data[np.argmin(-data[:,-1]), i+1], np.min(-data[:,-1]), marker = '*', s = 200)
-            axs[i].set_xlabel('Idx', fontsize = 10)
+            axs[i].set_xlabel(header[i+1], fontsize = 10)
             axs[i].set_ylabel(r'$\chi^2$', fontsize = 10)
-            axs[i].set_title('Min at {}'.format(data[np.argmin(-data[:,-1]), i].round(decimals = 5)), fontsize= 10)
+            axs[i].set_title('Min at {} = {}'.format(header[i+1], data[np.argmin(-data[:,-1]), i].round(decimals = 5, out = None)), fontsize= 10)
             axs[i].grid(True)
             axs[i].set_axisbelow(True)
         
         fig.align_labels()
-        
-        plt.show()
+
         fig.savefig($fig_name+"_vs_params.png")
     
     """ 
