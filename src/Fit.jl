@@ -95,11 +95,11 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
 
         fig.savefig($fig_name+"_vs_params.png")
 
-    best_so_far = np.argmax(y)
-    Params_best = X[best_so_far]
-    md, std = surrogate(GP_model, X)
-    print(md)
-    print(std)
+    # best_so_far = np.argmax(y)
+    # Params_best = X[best_so_far]
+    # md, std = surrogate(GP_model, X)
+    # print(md)
+    # print(std)
     
     """ 
     
