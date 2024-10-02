@@ -87,7 +87,7 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
             axs[i].scatter(data[np.argmin(-data[:,-1]), i+1], np.min(-data[:,-1]), marker = '*', s = 200)
             axs[i].set_xlabel(header[i+1], fontsize = 10)
             axs[i].set_ylabel(r'$\chi^2$', fontsize = 10)
-            axs[i].set_title('Min at {} = {}'.format(header[i+1], data[np.argmin(-data[:,-1]), i].round(decimals = 5, out = None)), fontsize= 10)
+            axs[i].set_title('Min at {} = {}'.format(header[i+1], data[np.argmin(-data[:,-1]), i+1].round(decimals = 5, out = None)), fontsize= 10)
             axs[i].grid(True)
             axs[i].set_axisbelow(True)
         
