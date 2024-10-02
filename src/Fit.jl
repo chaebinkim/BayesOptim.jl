@@ -103,7 +103,7 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
     Hessian_std = []
     for i in range(len(bounds)):
         x_vary = np.tile(Params_best, (n_samples, 1))
-        x_vary[:,i] += variations * Params_best[i]
+        x_vary[:,i] += variations * np.abs(Params_best[i])
         md, std = surrogate(GP_model, x_vary)
         Hessian.append(md)
         Hessian_std.append(std)
