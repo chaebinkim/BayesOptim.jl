@@ -95,8 +95,8 @@ function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "
 
         fig.savefig($fig_name+"_vs_params.png")
 
-    n_samples = 101
-    variations = np.linspace(-0.1, 0.1, n_samples)
+    n_samples = 501
+    variations = np.linspace(-0.5, 0.5, n_samples)
     best_so_far = np.argmax(y)
     Params_best = X[best_so_far]
     Hessian = []
