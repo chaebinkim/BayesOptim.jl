@@ -136,7 +136,7 @@ for idx in range(start, max_iter + 1):
     imin = int(np.argmin(chi2s)) + 1
     ax.scatter(imin, np.min(chi2s), marker='*', s=200)
     ax.set_xlabel('Idx', fontsize=15)
-    ax.set_ylabel(r'$\\chi^2$', fontsize=15)
+    ax.set_ylabel(r'$\chi^2$', fontsize=15)
     ax.set_title(f"Minimum is Idx = {imin}", fontsize=20)
     ax.grid(True); ax.set_axisbelow(True)
     fig.savefig(fig_name + "_vs_Idx.png"); plt.close(fig)
@@ -151,7 +151,7 @@ for idx in range(start, max_iter + 1):
         ybest = np.min(chi2s)
         axs[i].scatter(pbest, ybest, marker='*', s=200)
         axs[i].set_xlabel(param_order[i], fontsize=10)
-        axs[i].set_ylabel(r'$\\chi^2$', fontsize=10)
+        axs[i].set_ylabel(r'$\chi^2$', fontsize=10)
         axs[i].set_title(f"Min at {param_order[i]} = {pbest:.5f}", fontsize=10)
         axs[i].grid(True); axs[i].set_axisbelow(True)
     fig.align_labels()
