@@ -7,7 +7,18 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import json
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import Matern
+from sklearn.gaussian_process.kernels import Matern, ConstantKernel as C, WhiteKernel
+
+# ---- Helpers for safe log-transform ----
+def sanitize_chi2(chi2, chi2_bad=1e30):
+    z = float(chi2)
+    if not np.isfinite(z) or z <= 0:
+        z = chi2_bad   # treat invalid/failed evals as very bad chi2
+    return z
+
+def chi2_to_y(chi2, eps=1e-12, chi2_bad=1e30):
+    z = sanitize_chi2(chi2, chi2_bad=chi2_bad)
+    return -np.log(z + eps)
 
 # ---- Config from Julia ----
 bounds = $interval
@@ -16,33 +27,33 @@ max_iter = int($max_iter)
 file_name = $file_name
 fig_name = $fig_name
 
-# ---- GP model (ARD + normalize_y) ----
+# ---- GP model (ARD + normalize_y) wrapped in UnitSpaceGP ----
 d = len(param_order)
-kernel = Matern(length_scale=np.ones(d), length_scale_bounds=(1e-3, 1e3), nu=2.5)
+kernel = C(1.0, (1e-3, 1e3)) * Matern(length_scale=np.ones(d),
+                                      length_scale_bounds=(1e-5, 1e5),
+                                      nu=2.5)              + WhiteKernel(noise_level=1e-6, noise_level_bounds=(1e-10, 1e-2))
 GP_model = GaussianProcessRegressor(
     kernel=kernel,
     normalize_y=True,
     optimizer='fmin_l_bfgs_b',
     n_restarts_optimizer=10
 )
+GP = UnitSpaceGP(GP_model, bounds, param_order)  # << input scaling wrapper
 
 rng = np.random.default_rng(12345)
 
 # ---- Restart or init ----
 X, y, idx_list = Restart(bounds, file_name, param_order=param_order)
 start = int(idx_list[-1, 0]) + 1
-# We'll keep chi2s purely for plotting/logging (not required for BO math)
 chi2s = []
 
-# If restarting and we have an existing CSV with Chi2, load it for plot continuation
+# Continue chi2 history if present
 try:
     df_prev = pd.read_csv(file_name + ".csv", sep='\t')
     if "Chi2" in df_prev.columns:
         chi2s = df_prev["Chi2"].astype(float).tolist()
-    else:
-        # legacy
-        if "Obj" in df_prev.columns:
-            chi2s = [np.nan]*len(df_prev["Obj"])
+    elif "Obj" in df_prev.columns:
+        chi2s = [np.nan]*len(df_prev["Obj"])  # legacy
 except Exception:
     pass
 
@@ -57,8 +68,8 @@ if start == 1:
         for j, p in enumerate(param_order):
             params[p] = float(X0[i, j])
         chi2_i = $Objective(params)
-        y_i = -np.log(chi2_i + 1e-12)
-        y0_list.append(y_i); chi20_list.append(chi2_i)
+        y_i = chi2_to_y(chi2_i)
+        y0_list.append(y_i); chi20_list.append(sanitize_chi2(chi2_i))
     X = X0
     y = np.array(y0_list, dtype=float)
     chi2s = chi20_list
@@ -76,15 +87,15 @@ xi = 0.01    # EI explore rate
 # ---- Main loop ----
 for idx in range(start, max_iter + 1):
     print(f"Bayesian Opt Step :: {idx}")
-    # Fit GP
-    GP_model.fit(X, y)
+    # Fit GP (on unit space via wrapper)
+    GP.fit(X, y)
 
     # Trust-region dict
     tr = None if (len(y) < 2) else {'L': L, 'auto_center': True}
 
     # Propose next
     x_next = Opt_Acquisition(
-        X, y, GP_model, bounds=bounds,
+        X, y, GP, bounds=bounds,
         explore=xi, n_cand=4096, k_refine=8,
         param_order=param_order, trust_region=tr, rng=rng
     )
@@ -94,13 +105,13 @@ for idx in range(start, max_iter + 1):
     for i, p in enumerate(param_order):
         params[p] = float(x_next[0, i])
     chi2_next = $Objective(params)
-    y_next = -np.log(chi2_next + 1e-12)
+    y_next = chi2_to_y(chi2_next)
 
     # Update datasets
     X = np.vstack([X, x_next])
     y = np.append(y, y_next)
     idx_list = np.vstack([idx_list, [idx]])
-    chi2s.append(float(chi2_next))
+    chi2s.append(float(sanitize_chi2(chi2_next)))
 
     # Success / fail logic
     i_best = int(np.argmax(y[:-1])) if len(y) > 1 else 0
@@ -117,9 +128,7 @@ for idx in range(start, max_iter + 1):
             L *= 0.5
             fail = 0
     if L < L_min:
-        # reset to global search
-        L = 0.8
-        succ, fail = 0, 0
+        L = 0.8; succ, fail = 0, 0  # reset to global
 
     # ---- Logging (CSV) ----
     data = np.hstack([idx_list, X, np.array(chi2s).reshape(-1,1), y.reshape(-1,1)])
@@ -136,7 +145,7 @@ for idx in range(start, max_iter + 1):
     imin = int(np.argmin(chi2s)) + 1
     ax.scatter(imin, np.min(chi2s), marker='*', s=200)
     ax.set_xlabel('Idx', fontsize=15)
-    ax.set_ylabel(r'$\chi^2$', fontsize=15)
+    ax.set_ylabel('$\\chi^2$', fontsize=15)  # TeX mathtext
     ax.set_title(f"Minimum is Idx = {imin}", fontsize=20)
     ax.grid(True); ax.set_axisbelow(True)
     fig.savefig(fig_name + "_vs_Idx.png"); plt.close(fig)
@@ -151,7 +160,7 @@ for idx in range(start, max_iter + 1):
         ybest = np.min(chi2s)
         axs[i].scatter(pbest, ybest, marker='*', s=200)
         axs[i].set_xlabel(param_order[i], fontsize=10)
-        axs[i].set_ylabel(r'$\chi^2$', fontsize=10)
+        axs[i].set_ylabel('$\\chi^2$', fontsize=10)
         axs[i].set_title(f"Min at {param_order[i]} = {pbest:.5f}", fontsize=10)
         axs[i].grid(True); axs[i].set_axisbelow(True)
     fig.align_labels()
@@ -161,7 +170,7 @@ for idx in range(start, max_iter + 1):
 try:
     tr_final = {'L': L, 'auto_center': True} if len(y) > 2 else None
     summary = optimal_std_via_sampling(
-        GP_model, bounds, param_order,
+        GP, bounds, param_order,
         X=X, y=y,
         n_funcs=200, n_cand=2000,
         trust_region=tr_final, eps=1e-12

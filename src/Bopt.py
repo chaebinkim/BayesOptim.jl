@@ -1,13 +1,19 @@
 """
-Bopt.py — Bayesian Optimization helpers (single-point, trust-region aware)
+Bopt.py — Bayesian Optimization helpers (unit-space wrapper, trust-region aware)
 
 Contents
 --------
+- UnitSpaceGP: wraps sklearn GPR to work in [0,1]^d (input normalization)
 - surrogate(): GP predict mean/std
 - Expected_Improvement(): EI for maximization (uses observed y_best)
 - Opt_Acquisition(): sample→rank→local-refine (L-BFGS-B), trust-region aware
-- Restart(): load previous CSV log
 - optimal_std_via_sampling(): posterior function sampling to estimate std of optimum
+- Restart(): load previous CSV log
+
+Notes
+-----
+* We MAXIMIZE y. For chi2 minimization, we transform inside Fit.jl via y = -log(chi2 + eps).
+* Bounds are given in original parameter scales; UnitSpaceGP handles normalization.
 """
 import os
 import numpy as np
@@ -43,6 +49,31 @@ def from_unit_batch(bounds, param_order, U):
     return lo + U * (hi - lo)
 
 # ------------------------------
+# Unit-space GP wrapper
+# ------------------------------
+class UnitSpaceGP:
+    """Wrap sklearn GPR so that fit/predict/sample_y are done in unit space [0,1]^d."""
+    def __init__(self, model, bounds, param_order):
+        self.model = model
+        self.bounds = bounds
+        self.param_order = list(param_order)
+
+    def _to_unit(self, X):
+        return to_unit_batch(self.bounds, self.param_order, X)
+
+    def fit(self, X, y):
+        X_u = self._to_unit(X)
+        return self.model.fit(X_u, y)
+
+    def predict(self, X, return_std=True):
+        X_u = self._to_unit(X)
+        return self.model.predict(X_u, return_std=return_std)
+
+    def sample_y(self, X, n_samples=1, random_state=None):
+        X_u = self._to_unit(X)
+        return self.model.sample_y(X_u, n_samples=n_samples, random_state=random_state)
+
+# ------------------------------
 # Utils
 # ------------------------------
 def _as_2d(X):
@@ -68,8 +99,7 @@ def _sample_candidates(bounds, param_order, n_cand=4096, trust_region=None, rng=
         rng = np.random.default_rng()
     d = len(param_order)
     if trust_region is None:
-        # global uniform in unit space
-        U = rng.random((n_cand, d))
+        U = rng.random((n_cand, d))  # global uniform in unit space
     else:
         L = float(trust_region.get('L', 1.0))
         L = max(1e-6, min(1.0, L))
@@ -78,8 +108,7 @@ def _sample_candidates(bounds, param_order, n_cand=4096, trust_region=None, rng=
             raise ValueError("center_u size mismatch.")
         U = center_u + (rng.random((n_cand, d)) - 0.5) * L
         U = np.clip(U, 0.0, 1.0)
-    # Map to original space
-    XR = from_unit_batch(bounds, param_order, U)
+    XR = from_unit_batch(bounds, param_order, U)  # map to original
     return XR, U
 
 # ------------------------------
@@ -94,17 +123,11 @@ def surrogate(model, X):
     return mu, std
 
 def Expected_Improvement(X_obs, XS, model, explore, y_obs):
-    """
-    EI(x) = (μ - y_best - ξ) Φ(Z) + σ φ(Z), Z = (μ - y_best - ξ)/σ
-    We maximize y.
-    """
+    """EI(x) = (μ - y_best - ξ) Φ(Z) + σ φ(Z), with y_best from observed y."""
     X_obs = _as_2d(X_obs)
     XS = _as_2d(XS)
     y_obs = np.asarray(y_obs, dtype=float).reshape(-1)
-    if y_obs.size == 0:
-        y_best = -np.inf
-    else:
-        y_best = float(np.max(y_obs))
+    y_best = -np.inf if y_obs.size == 0 else float(np.max(y_obs))
     mu, std = surrogate(model, XS)
     imp = mu - y_best - float(explore)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -120,11 +143,7 @@ def Expected_Improvement(X_obs, XS, model, explore, y_obs):
 # Acquisition (single point)
 # ------------------------------
 def Opt_Acquisition(X, y_obs, model, bounds, explore=0.01, n_cand=4096, k_refine=8, param_order=None, trust_region=None, rng=None):
-    """
-    Return a single next point (1, d). If trust_region provided with auto_center=True,
-    the region is centered at current best (in unit space) computed from (X, y_obs).
-    trust_region: may contain {'L': float, 'auto_center': bool} or {'L': float, 'center_u': array}
-    """
+    """Return one next point (1,d). Trust region {'L', 'auto_center'| 'center_u'} supported."""
     X = _as_2d(X)
     y_obs = np.asarray(y_obs, dtype=float).reshape(-1)
     if param_order is None:
@@ -132,12 +151,12 @@ def Opt_Acquisition(X, y_obs, model, bounds, explore=0.01, n_cand=4096, k_refine
     if rng is None:
         rng = np.random.default_rng()
 
-    # Resolve trust-region center if requested
+    # Resolve trust-region center
     tr = None
     if trust_region is not None:
         if trust_region.get('auto_center', False) and y_obs.size > 0:
             best_idx = int(np.argmax(y_obs))
-            x_best = X[best_idx : best_idx+1, :]
+            x_best = X[best_idx:best_idx+1, :]
             center_u = to_unit_batch(bounds, param_order, x_best).reshape(-1)
             tr = {'L': float(trust_region.get('L', 1.0)), 'center_u': center_u}
         elif 'center_u' in trust_region:
@@ -188,34 +207,20 @@ def Opt_Acquisition(X, y_obs, model, bounds, explore=0.01, n_cand=4096, k_refine
 # ------------------------------
 # Posterior sampling-based uncertainty of optimum
 # ------------------------------
-def optimal_std_via_sampling(model, bounds, param_order, X=None, y=None, n_funcs=200, n_cand=8192,
+def optimal_std_via_sampling(model, bounds, param_order, X=None, y=None, n_funcs=200, n_cand=2000,
                              trust_region=None, rng=None, eps=1e-12):
-    """
-    Estimate std of the optimal y and chi2 via posterior function sampling.
-
-    Parameters
-    ----------
-    model : fitted GaussianProcessRegressor
-    bounds : dict name -> [lo, hi]
-    param_order : list of parameter names (order for columns)
-    X, y : optional arrays (used when trust_region={'L':..., 'auto_center':True})
-    n_funcs : number of posterior function samples
-    n_cand : number of candidate points for discretized maximization
-    trust_region : None or {'L': float, 'auto_center': True} or {'L': float, 'center_u': array}
-    rng : numpy Generator or None
-    eps : small constant used in chi2 = exp(-y) - eps
-    """
+    """Estimate std of optimal y and chi2 via posterior function sampling on a candidate set."""
     if rng is None:
         rng = np.random.default_rng()
 
-    # Resolve trust-region center if requested
+    # Resolve trust-region
     tr = None
     if trust_region is not None:
         if trust_region.get('auto_center', False) and (X is not None) and (y is not None) and (len(y) > 0):
             X = _as_2d(X)
             y = np.asarray(y, dtype=float).reshape(-1)
             best_idx = int(np.argmax(y))
-            x_best = X[best_idx : best_idx+1, :]
+            x_best = X[best_idx:best_idx+1, :]
             center_u = to_unit_batch(bounds, param_order, x_best).reshape(-1)
             tr = {'L': float(trust_region.get('L', 1.0)), 'center_u': center_u}
         elif 'center_u' in trust_region:
@@ -225,21 +230,20 @@ def optimal_std_via_sampling(model, bounds, param_order, X=None, y=None, n_funcs
     # Candidate set
     XR, _ = _sample_candidates(bounds, param_order, n_cand=n_cand, trust_region=tr, rng=rng)
 
-    # Posterior function samples: shape (n_cand, n_funcs)
+    # Posterior function samples: (n_cand, n_funcs)
     YS = model.sample_y(XR, n_samples=int(n_funcs), random_state=None)
     if YS.ndim == 1:
         YS = YS[:, None]
-    # In sklearn, sample_y returns (n_cand, n_funcs) by default; ensure that
     if YS.shape[0] != XR.shape[0]:
-        YS = YS.T  # make it (n_cand, n_funcs)
+        YS = YS.T
 
     # Optimum per sample
     idx_max = np.argmax(YS, axis=0)               # (n_funcs,)
     y_star = YS[idx_max, np.arange(YS.shape[1])]  # (n_funcs,)
     X_star = XR[idx_max, :]                       # (n_funcs, d)
 
-    # Convert back to chi2
-    chi2_star = np.exp(-y_star) - float(eps)
+    # Convert back to chi2 (clip to >= 0 for numerical safety)
+    chi2_star = np.maximum(np.exp(-y_star) - float(eps), 0.0)
 
     out = {
         "y_star_mean": float(np.mean(y_star)),
@@ -255,11 +259,7 @@ def optimal_std_via_sampling(model, bounds, param_order, X=None, y=None, n_funcs
 # Restart helper
 # ------------------------------
 def Restart(bounds, file_name, param_order=None):
-    """
-    Load previous CSV if present.
-    Columns preferred: ["ID"] + param_order + ["Chi2", "Y"]
-    Fallback accepted: ["ID"] + param_order + ["Obj"]  (treated as Y)
-    """
+    """Load previous CSV if present. Columns: [ID] + param_order + [Chi2, Y] (or legacy [Obj])."""
     if param_order is None:
         param_order = list(bounds.keys())
     csv_path = f"{file_name}.csv"
@@ -271,17 +271,10 @@ def Restart(bounds, file_name, param_order=None):
 
     try:
         df = pd.read_csv(csv_path, sep="\t")
-        cols_base = ["ID"] + list(param_order)
-        # Preferred path
         if "Y" in df.columns:
-            need = cols_base + ["Y"]
-            for c in need:
-                if c not in df.columns:
-                    raise ValueError(f"Missing column {c}")
             X = df[param_order].to_numpy(dtype=float)
             y = df["Y"].to_numpy(dtype=float).reshape(-1)
-        elif "Obj" in df.columns:
-            # Legacy
+        elif "Obj" in df.columns:  # legacy
             X = df[param_order].to_numpy(dtype=float)
             y = df["Obj"].to_numpy(dtype=float).reshape(-1)
         else:
