@@ -1,25 +1,20 @@
 """
-Bopt.py — Bayesian Optimization helpers (unit-space wrapper, trust-region aware)
+Bopt.py — Bayesian Optimization helpers
+(unit-space wrapper, trust-region aware, exploration helpers)
 
-Contents
---------
-- UnitSpaceGP: wraps sklearn GPR to work in [0,1]^d (input normalization)
-- surrogate(): GP predict mean/std
-- Expected_Improvement(): EI for maximization (uses observed y_best)
-- Opt_Acquisition(): sample→rank→local-refine (L-BFGS-B), trust-region aware
-- optimal_std_via_sampling(): posterior function sampling to estimate std of optimum
-- Restart(): load previous CSV log
-
-Notes
------
-* We MAXIMIZE y. For chi2 minimization, we transform inside Fit.jl via y = -log(chi2 + eps).
-* Bounds are given in original parameter scales; UnitSpaceGP handles normalization.
+Additions in this patch:
+- UnitSpaceGP: GP wrapper to operate in unit space [0,1]^d
+- Propose_Thompson / Propose_MaxStd: forced exploration proposals
+- Global_PI: global Probability-of-Improvement score (far from existing points)
+- Min-distance selection inside Opt_Acquisition to reduce local clustering
+- Other existing utilities retained (EI, TuRBO-lite sampling, restart, posterior sampling)
 """
 import os
 import numpy as np
 import warnings
 from scipy.optimize import minimize
 from scipy.stats import norm
+from scipy.spatial.distance import cdist
 
 try:
     import pandas as pd
@@ -39,7 +34,7 @@ def to_unit_batch(bounds, param_order, X):
     if X.ndim == 1:
         X = X[None, :]
     lo, hi = _bounds_arrays(bounds, param_order)
-    return (X - lo) / (hi - lo)
+    return (X - lo) / (hi - lo + 1e-15)
 
 def from_unit_batch(bounds, param_order, U):
     U = np.asarray(U, dtype=float)
@@ -140,10 +135,51 @@ def Expected_Improvement(X_obs, XS, model, explore, y_obs):
     return ei.reshape(-1)
 
 # ------------------------------
-# Acquisition (single point)
+# Exploration helpers
 # ------------------------------
-def Opt_Acquisition(X, y_obs, model, bounds, explore=0.01, n_cand=4096, k_refine=8, param_order=None, trust_region=None, rng=None):
-    """Return one next point (1,d). Trust region {'L', 'auto_center'| 'center_u'} supported."""
+def _far_mask(bounds, param_order, XR, X, min_dist=0.15):
+    Uc = to_unit_batch(bounds, param_order, XR)
+    if X is None or len(X) == 0:
+        return np.ones(len(XR), dtype=bool)
+    Ux = to_unit_batch(bounds, param_order, X)
+    dmin = cdist(Uc, Ux).min(axis=1)
+    return dmin > float(min_dist)
+
+def Propose_Thompson(model, bounds, param_order, X=None, n_cand=4096, min_dist=0.15, rng=None):
+    XR, _ = _sample_candidates(bounds, param_order, n_cand=n_cand, trust_region=None, rng=rng)
+    YS = model.sample_y(XR, n_samples=1)  # (n_cand,1) or (n_cand,)
+    if YS.ndim > 1:
+        YS = YS[:, 0]
+    mask = _far_mask(bounds, param_order, XR, X, min_dist=min_dist)
+    if np.any(mask):
+        idx = int(np.argmax(YS[mask]))
+        return XR[mask][idx:idx+1, :]
+    return XR[np.argmax(YS):np.argmax(YS)+1, :]
+
+def Propose_MaxStd(model, bounds, param_order, X=None, n_cand=4096, min_dist=0.15, rng=None):
+    XR, _ = _sample_candidates(bounds, param_order, n_cand=n_cand, trust_region=None, rng=rng)
+    _, std = surrogate(model, XR)
+    mask = _far_mask(bounds, param_order, XR, X, min_dist=min_dist)
+    if np.any(mask):
+        idx = int(np.argmax(std[mask]))
+        return XR[mask][idx:idx+1, :]
+    return XR[np.argmax(std):np.argmax(std)+1, :]
+
+def Global_PI(model, bounds, param_order, X, y, delta=1e-3, n_cand=4000, min_dist=0.15, rng=None):
+    XR, _ = _sample_candidates(bounds, param_order, n_cand=n_cand, trust_region=None, rng=rng)
+    mu, std = surrogate(model, XR)
+    y_best = float(np.max(y)) if len(y) else -np.inf
+    z = (mu - (y_best + delta)) / (std + 1e-12)
+    PI = norm.cdf(z)
+    mask = _far_mask(bounds, param_order, XR, X, min_dist=min_dist)
+    return float(np.max(PI[mask])) if np.any(mask) else float(np.max(PI))
+
+# ------------------------------
+# Acquisition with min-distance preference
+# ------------------------------
+def Opt_Acquisition(X, y_obs, model, bounds, explore=0.01, n_cand=4096, k_refine=8,
+                    param_order=None, trust_region=None, rng=None, min_dist=0.10):
+    """Return one next point (1,d). Prefers candidates far from observed points (min_dist in unit space)."""
     X = _as_2d(X)
     y_obs = np.asarray(y_obs, dtype=float).reshape(-1)
     if param_order is None:
@@ -164,7 +200,7 @@ def Opt_Acquisition(X, y_obs, model, bounds, explore=0.01, n_cand=4096, k_refine
                   'center_u': np.asarray(trust_region['center_u'], dtype=float).reshape(-1)}
 
     # Sample and score
-    XR, U = _sample_candidates(bounds, param_order, n_cand=n_cand, trust_region=tr, rng=rng)
+    XR, _ = _sample_candidates(bounds, param_order, n_cand=n_cand, trust_region=tr, rng=rng)
     EI = Expected_Improvement(X, XR, model, explore=explore, y_obs=y_obs)
     order = np.argsort(-EI)
     starts = XR[order[:max(1, int(k_refine))], :]
@@ -191,34 +227,32 @@ def Opt_Acquisition(X, y_obs, model, bounds, explore=0.01, n_cand=4096, k_refine
             best_val = val
             best_x = x_cand
 
-    # Dedup in unit space
+    # Prefer far-enough candidate among EI-ranked list
     X_u = to_unit_batch(bounds, param_order, X)
-    x_u = to_unit_batch(bounds, param_order, best_x)
-    if _dedup_unit(x_u.reshape(-1), X_u, tol=1e-6):
-        for idx in order:
-            x_alt = XR[idx]
-            x_alt_u = to_unit_batch(bounds, param_order, x_alt).reshape(-1)
-            if not _dedup_unit(x_alt_u, X_u):
-                best_x = x_alt
-                break
+    for idx0 in order:
+        x_try = XR[idx0]
+        x_u = to_unit_batch(bounds, param_order, x_try).reshape(1, -1)
+        if X_u is None or len(X_u) == 0:
+            best_x = x_try; break
+        dmin = np.min(np.linalg.norm(X_u - x_u, axis=1))
+        if dmin > float(min_dist):
+            best_x = x_try; break
+    # else keep best_x from local refine
 
     return best_x.reshape(1, -1)
 
 # ------------------------------
 # Posterior sampling-based uncertainty of optimum
 # ------------------------------
-def optimal_std_via_sampling(model, bounds, param_order, X=None, y=None, n_funcs=200, n_cand=2000,
-                             trust_region=None, rng=None, eps=1e-12):
-    """Estimate std of optimal y and chi2 via posterior function sampling on a candidate set."""
+def optimal_std_via_sampling(model, bounds, param_order, X=None, y=None,
+                             n_funcs=200, n_cand=2000, trust_region=None, rng=None, eps=1e-12):
     if rng is None:
         rng = np.random.default_rng()
-
-    # Resolve trust-region
+    # Resolve trust-region (optional)
     tr = None
     if trust_region is not None:
         if trust_region.get('auto_center', False) and (X is not None) and (y is not None) and (len(y) > 0):
-            X = _as_2d(X)
-            y = np.asarray(y, dtype=float).reshape(-1)
+            X = _as_2d(X); y = np.asarray(y, dtype=float).reshape(-1)
             best_idx = int(np.argmax(y))
             x_best = X[best_idx:best_idx+1, :]
             center_u = to_unit_batch(bounds, param_order, x_best).reshape(-1)
@@ -226,25 +260,15 @@ def optimal_std_via_sampling(model, bounds, param_order, X=None, y=None, n_funcs
         elif 'center_u' in trust_region:
             tr = {'L': float(trust_region.get('L', 1.0)),
                   'center_u': np.asarray(trust_region['center_u'], dtype=float).reshape(-1)}
-
-    # Candidate set
+    # Candidate set & samples
     XR, _ = _sample_candidates(bounds, param_order, n_cand=n_cand, trust_region=tr, rng=rng)
-
-    # Posterior function samples: (n_cand, n_funcs)
     YS = model.sample_y(XR, n_samples=int(n_funcs), random_state=None)
-    if YS.ndim == 1:
-        YS = YS[:, None]
-    if YS.shape[0] != XR.shape[0]:
-        YS = YS.T
-
-    # Optimum per sample
-    idx_max = np.argmax(YS, axis=0)               # (n_funcs,)
-    y_star = YS[idx_max, np.arange(YS.shape[1])]  # (n_funcs,)
-    X_star = XR[idx_max, :]                       # (n_funcs, d)
-
-    # Convert back to chi2 (clip to >= 0 for numerical safety)
+    if YS.ndim == 1: YS = YS[:, None]
+    if YS.shape[0] != XR.shape[0]: YS = YS.T
+    idx_max = np.argmax(YS, axis=0)
+    y_star = YS[idx_max, np.arange(YS.shape[1])]
+    X_star = XR[idx_max, :]
     chi2_star = np.maximum(np.exp(-y_star) - float(eps), 0.0)
-
     out = {
         "y_star_mean": float(np.mean(y_star)),
         "y_star_std":  float(np.std(y_star, ddof=1)),
@@ -259,7 +283,6 @@ def optimal_std_via_sampling(model, bounds, param_order, X=None, y=None, n_funcs
 # Restart helper
 # ------------------------------
 def Restart(bounds, file_name, param_order=None):
-    """Load previous CSV if present. Columns: [ID] + param_order + [Chi2, Y] (or legacy [Obj])."""
     if param_order is None:
         param_order = list(bounds.keys())
     csv_path = f"{file_name}.csv"
@@ -268,13 +291,12 @@ def Restart(bounds, file_name, param_order=None):
         y = np.array([], dtype=float)
         idx_list = np.array([[0]], dtype=int)
         return X, y, idx_list
-
     try:
         df = pd.read_csv(csv_path, sep="\t")
         if "Y" in df.columns:
             X = df[param_order].to_numpy(dtype=float)
             y = df["Y"].to_numpy(dtype=float).reshape(-1)
-        elif "Obj" in df.columns:  # legacy
+        elif "Obj" in df.columns:
             X = df[param_order].to_numpy(dtype=float)
             y = df["Obj"].to_numpy(dtype=float).reshape(-1)
         else:

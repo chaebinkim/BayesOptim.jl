@@ -13,7 +13,7 @@ from sklearn.gaussian_process.kernels import Matern, ConstantKernel as C, WhiteK
 def sanitize_chi2(chi2, chi2_bad=1e30):
     z = float(chi2)
     if not np.isfinite(z) or z <= 0:
-        z = chi2_bad   # treat invalid/failed evals as very bad chi2
+        z = chi2_bad
     return z
 
 def chi2_to_y(chi2, eps=1e-12, chi2_bad=1e30):
@@ -31,14 +31,15 @@ fig_name = $fig_name
 d = len(param_order)
 kernel = C(1.0, (1e-3, 1e3)) * Matern(length_scale=np.ones(d),
                                       length_scale_bounds=(1e-5, 1e5),
-                                      nu=2.5)              + WhiteKernel(noise_level=1e-6, noise_level_bounds=(1e-10, 1e-2))
+                                      nu=2.5) \
+         + WhiteKernel(noise_level=1e-6, noise_level_bounds=(1e-10, 1e-2))
 GP_model = GaussianProcessRegressor(
     kernel=kernel,
     normalize_y=True,
     optimizer='fmin_l_bfgs_b',
     n_restarts_optimizer=10
 )
-GP = UnitSpaceGP(GP_model, bounds, param_order)  # << input scaling wrapper
+GP = UnitSpaceGP(GP_model, bounds, param_order)  # unit-space wrapper
 
 rng = np.random.default_rng(12345)
 
@@ -46,14 +47,10 @@ rng = np.random.default_rng(12345)
 X, y, idx_list = Restart(bounds, file_name, param_order=param_order)
 start = int(idx_list[-1, 0]) + 1
 chi2s = []
-
-# Continue chi2 history if present
 try:
-    df_prev = pd.read_csv(file_name + ".csv", sep='\t')
-    if "Chi2" in df_prev.columns:
-        chi2s = df_prev["Chi2"].astype(float).tolist()
-    elif "Obj" in df_prev.columns:
-        chi2s = [np.nan]*len(df_prev["Obj"])  # legacy
+    df_prev = pd.read_csv(file_name + ".csv", sep='\\t')
+    if "Chi2" in df_prev.columns: chi2s = df_prev["Chi2"].astype(float).tolist()
+    elif "Obj" in df_prev.columns: chi2s = [np.nan]*len(df_prev["Obj"])
 except Exception:
     pass
 
@@ -82,7 +79,11 @@ L_min = 0.05 # below this, reset to global
 succ, fail = 0, 0
 succ_th = 3
 fail_th = 3
-xi = 0.01    # EI explore rate
+
+# ---- Adaptive EI exploration rate ----
+xi0, xi_min, decay = 0.05, 0.005, 0.5
+xi = xi0
+plateau, W = 0, 10   # plateau counter over a window of W
 
 # ---- Main loop ----
 for idx in range(start, max_iter + 1):
@@ -93,51 +94,77 @@ for idx in range(start, max_iter + 1):
     # Trust-region dict
     tr = None if (len(y) < 2) else {'L': L, 'auto_center': True}
 
-    # Propose next
-    x_next = Opt_Acquisition(
-        X, y, GP, bounds=bounds,
-        explore=xi, n_cand=4096, k_refine=8,
-        param_order=param_order, trust_region=tr, rng=rng
-    )
+    # --- Decide proposal (EI vs forced exploration) ---
+    force_explore = False
+    # Trigger when repeated failures shrink L or when plateau persists
+    if (fail >= fail_th and L <= 0.2) or (plateau >= 2):
+        try:
+            # Optional: check global PI to see if far-away improvement is promising
+            pi_far = Global_PI(GP, bounds, param_order, X, y, delta=1e-3, n_cand=3000, min_dist=0.15, rng=rng)
+            force_explore = (pi_far >= 0.10)
+        except Exception:
+            force_explore = True  # fall back to exploration if PI fails
 
-    # Evaluate objective
+    if force_explore and len(y) >= 5:
+        # One-shot exploration from the global space, alternating modes
+        if (idx % 2) == 0:
+            x_next = Propose_Thompson(GP, bounds, param_order, X=X, n_cand=4000, min_dist=0.15, rng=rng)
+        else:
+            x_next = Propose_MaxStd(GP, bounds, param_order, X=X, n_cand=4000, min_dist=0.15, rng=rng)
+    else:
+        # Regular EI inside trust-region (with min-distance preference in Opt_Acquisition)
+        x_next = Opt_Acquisition(
+            X, y, GP, bounds=bounds,
+            explore=xi, n_cand=4096, k_refine=8,
+            param_order=param_order, trust_region=tr, rng=rng, min_dist=0.10
+        )
+
+    # ---- Evaluate objective
     params = {"ID": idx}
     for i, p in enumerate(param_order):
         params[p] = float(x_next[0, i])
     chi2_next = $Objective(params)
     y_next = chi2_to_y(chi2_next)
 
-    # Update datasets
+    # ---- Update datasets
     X = np.vstack([X, x_next])
     y = np.append(y, y_next)
     idx_list = np.vstack([idx_list, [idx]])
     chi2s.append(float(sanitize_chi2(chi2_next)))
 
-    # Success / fail logic
+    # ---- Success / fail logic
     i_best = int(np.argmax(y[:-1])) if len(y) > 1 else 0
     improved = (y_next > y[i_best] + 1e-6)
     if improved:
         succ += 1; fail = 0
         L = min(1.0, L * 1.5)  # expand region on success
         if succ >= succ_th:
-            L = min(1.0, L * 1.2)
-            succ = 0
+            L = min(1.0, L * 1.2); succ = 0
     else:
         fail += 1; succ = 0
         if fail >= fail_th:
-            L *= 0.5
-            fail = 0
+            L *= 0.5; fail = 0
     if L < L_min:
         L = 0.8; succ, fail = 0, 0  # reset to global
 
-    # ---- Logging (CSV) ----
+    # ---- Adaptive xi update (plateau detection)
+    if len(chi2s) >= W + 1:
+        best_prev = np.min(chi2s[:-W]); best_now = np.min(chi2s)
+        rel = (best_prev - best_now) / (best_prev + 1e-12)
+        if rel < 1e-3:    # <0.1% improvement over window
+            plateau += 1
+        else:
+            plateau = max(0, plateau - 1)
+    xi = max(xi_min, xi0 * (decay ** plateau))
+
+    # ---- Logging (CSV)
     data = np.hstack([idx_list, X, np.array(chi2s).reshape(-1,1), y.reshape(-1,1)])
     header = ["ID"] + param_order + ["Chi2", "Y"]
     df = pd.DataFrame(data, columns=header)
     df["ID"] = df["ID"].astype(int)
-    df.to_csv(file_name + ".csv", sep='\t', index=False)
+    df.to_csv(file_name + ".csv", sep='\\t', index=False)
 
-    # ---- Plots ----
+    # ---- Plots
     # 1) Chi2 vs iteration
     fig, ax = plt.subplots(layout='constrained')
     iters = np.arange(1, len(chi2s) + 1)
@@ -145,7 +172,7 @@ for idx in range(start, max_iter + 1):
     imin = int(np.argmin(chi2s)) + 1
     ax.scatter(imin, np.min(chi2s), marker='*', s=200)
     ax.set_xlabel('Idx', fontsize=15)
-    ax.set_ylabel('$\\chi^2$', fontsize=15)  # TeX mathtext
+    ax.set_ylabel(r'$\chi^2$', fontsize=15)
     ax.set_title(f"Minimum is Idx = {imin}", fontsize=20)
     ax.grid(True); ax.set_axisbelow(True)
     fig.savefig(fig_name + "_vs_Idx.png"); plt.close(fig)
@@ -160,13 +187,13 @@ for idx in range(start, max_iter + 1):
         ybest = np.min(chi2s)
         axs[i].scatter(pbest, ybest, marker='*', s=200)
         axs[i].set_xlabel(param_order[i], fontsize=10)
-        axs[i].set_ylabel('$\\chi^2$', fontsize=10)
+        axs[i].set_ylabel(r'$\chi^2$', fontsize=10)
         axs[i].set_title(f"Min at {param_order[i]} = {pbest:.5f}", fontsize=10)
         axs[i].grid(True); axs[i].set_axisbelow(True)
     fig.align_labels()
     fig.savefig(fig_name + "_vs_params.png"); plt.close(fig)
 
-# ---- Posterior sampling uncertainty (ONLY at the very end) ----
+# ---- Posterior sampling uncertainty (ONLY at the very end)
 try:
     tr_final = {'L': L, 'auto_center': True} if len(y) > 2 else None
     summary = optimal_std_via_sampling(
