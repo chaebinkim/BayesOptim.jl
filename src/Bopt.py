@@ -1,17 +1,20 @@
 """
 Bopt.py — Bayesian Optimization helpers
-(unit-space wrapper, trust-region aware, exploration helpers)
+(unit-space wrapper, trust-region aware, exploration helpers, pairwise heatmaps)
 
 Additions in this patch:
 - UnitSpaceGP: GP wrapper to operate in unit space [0,1]^d
 - Propose_Thompson / Propose_MaxStd: forced exploration proposals
 - Global_PI: global Probability-of-Improvement score (far from existing points)
-- Min-distance selection inside Opt_Acquisition to reduce local clustering
-- Other existing utilities retained (EI, TuRBO-lite sampling, restart, posterior sampling)
+- Min-distance preference inside Opt_Acquisition to reduce local clustering
+- Pairwise heatmap utilities (E[chi2] and PI maps)
+- Other utilities retained (EI, TuRBO-lite sampling, restart, posterior sampling)
 """
 import os
 import numpy as np
 import warnings
+import itertools
+import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 from scipy.stats import norm
 from scipy.spatial.distance import cdist
@@ -280,6 +283,80 @@ def optimal_std_via_sampling(model, bounds, param_order, X=None, y=None,
     return out
 
 # ------------------------------
+# Pairwise heatmaps (E[chi2] / PI)
+# ------------------------------
+def _grid_for_pair(bounds, param_order, pair, x_fixed, grid_n=80):
+    p, q = pair
+    i = param_order.index(p); j = param_order.index(q)
+    lo, hi = _bounds_arrays(bounds, param_order)
+    xs = np.linspace(lo[i], hi[i], grid_n)
+    ys = np.linspace(lo[j], hi[j], grid_n)
+    # build full-dim grid with others fixed to x_fixed
+    base = np.array([x_fixed[k] for k in param_order], dtype=float)
+    grid = []
+    for b in ys:
+        for a in xs:
+            v = base.copy()
+            v[i] = a; v[j] = b
+            grid.append(v)
+    XR = np.array(grid, dtype=float)
+    return XR, xs, ys, i, j
+
+def pairwise_heatmap_plot(model, bounds, param_order, x_fixed,
+                          pairs=None, grid_n=80, mode="Echi2",
+                          eta=0.0, X_hist=None, chi2_hist=None,
+                          out_prefix="pair", eps=1e-12):
+    """
+    Draw pairwise heatmaps.
+    mode:
+      - 'Echi2' : E[chi2] = exp(-mu + 0.5*std^2) - eps   (y ~ N(mu,std^2), chi2 = exp(-y)-eps)
+      - 'PI'    : P(chi2 <= (1+eta)*chi2_best) == P(y >= y_thr)
+    """
+    if pairs is None:
+        pairs = list(itertools.combinations(param_order, 2))
+
+    chi2_best = None
+    if mode.upper() == "PI":
+        if chi2_hist is not None and len(chi2_hist):
+            chi2_best = float(np.nanmin(chi2_hist))
+        else:
+            mu0, _ = model.predict(np.array([[x_fixed[k] for k in param_order]]), return_std=True)
+            chi2_best = max(np.exp(-float(mu0)) - eps, 0.0)
+
+    for (p, q) in pairs:
+        XR, xs, ys, ii, jj = _grid_for_pair(bounds, param_order, (p, q), x_fixed, grid_n=grid_n)
+        mu, std = model.predict(XR, return_std=True)
+        mu = mu.reshape(-1); std = std.reshape(-1)
+
+        if mode.upper() == "ECHI2":
+            Z = np.maximum(np.exp(-mu + 0.5*std**2) - eps, 0.0)   # expected chi^2
+            label = "E[$\\chi^2$]"
+        else:  # PI
+            y_thr = -np.log((1.0 + float(eta)) * chi2_best + eps)
+            z = (mu - y_thr) / (std + 1e-12)
+            Z = norm.cdf(z)
+            label = "PI"
+
+        Z = Z.reshape(len(ys), len(xs))  # rows=y, cols=x
+
+        fig, ax = plt.subplots(figsize=(4.2, 3.8), layout='constrained')
+        im = ax.imshow(Z, extent=[xs[0], xs[-1], ys[0], ys[-1]],
+                       origin='lower', aspect='auto')
+        ax.set_xlabel(p); ax.set_ylabel(q)
+        cb = fig.colorbar(im, ax=ax, shrink=0.84)
+        cb.set_label(label)
+
+        # overlay: past evals and current best (x_fixed)
+        if X_hist is not None and len(X_hist):
+            pts = np.asarray(X_hist)[:, [ii, jj]]
+            ax.scatter(pts[:,0], pts[:,1], s=14, c='k', alpha=0.35, linewidths=0)
+        ax.scatter([x_fixed[p]], [x_fixed[q]], s=160, marker='*',
+            facecolors='none', edgecolors='w', linewidths=1.8)
+
+        fig.savefig(f"{out_prefix}_{p}_vs_{q}_{mode}.png", dpi=200)
+        plt.close(fig)
+
+# ------------------------------
 # Restart helper
 # ------------------------------
 def Restart(bounds, file_name, param_order=None):
@@ -292,7 +369,8 @@ def Restart(bounds, file_name, param_order=None):
         idx_list = np.array([[0]], dtype=int)
         return X, y, idx_list
     try:
-        df = pd.read_csv(csv_path, sep="\t")
+        # use C engine explicitly to avoid regex-sep fallback warning
+        df = pd.read_csv(csv_path, sep="\t", engine="c")
         if "Y" in df.columns:
             X = df[param_order].to_numpy(dtype=float)
             y = df["Y"].to_numpy(dtype=float).reshape(-1)

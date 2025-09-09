@@ -9,6 +9,8 @@ import json
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern, ConstantKernel as C, WhiteKernel
 
+SEP = "\t"  # use a real tab and force C engine on read_csv
+
 # ---- Helpers for safe log-transform ----
 def sanitize_chi2(chi2, chi2_bad=1e30):
     z = float(chi2)
@@ -48,7 +50,8 @@ X, y, idx_list = Restart(bounds, file_name, param_order=param_order)
 start = int(idx_list[-1, 0]) + 1
 chi2s = []
 try:
-    df_prev = pd.read_csv(file_name + ".csv", sep='\\t')
+    # Force C engine to avoid regex-sep fallback warning
+    df_prev = pd.read_csv(file_name + ".csv", sep=SEP, engine="c")
     if "Chi2" in df_prev.columns: chi2s = df_prev["Chi2"].astype(float).tolist()
     elif "Obj" in df_prev.columns: chi2s = [np.nan]*len(df_prev["Obj"])
 except Exception:
@@ -162,7 +165,7 @@ for idx in range(start, max_iter + 1):
     header = ["ID"] + param_order + ["Chi2", "Y"]
     df = pd.DataFrame(data, columns=header)
     df["ID"] = df["ID"].astype(int)
-    df.to_csv(file_name + ".csv", sep='\\t', index=False)
+    df.to_csv(file_name + ".csv", sep=SEP, index=False)
 
     # ---- Plots
     # 1) Chi2 vs iteration
@@ -199,7 +202,7 @@ try:
     summary = optimal_std_via_sampling(
         GP, bounds, param_order,
         X=X, y=y,
-        n_funcs=300, n_cand=4000,
+        n_funcs=200, n_cand=2000,
         trust_region=tr_final, eps=1e-12
     )
     print("[Uncertainty@final] y* std=%.4g  chi2* std=%.4g" % (summary["y_star_std"], summary["chi2_star_std"]))
@@ -207,5 +210,32 @@ try:
         json.dump({k:(v.tolist() if hasattr(v,'tolist') else v) for k,v in summary.items()}, f)
 except Exception as e:
     print("[Uncertainty@final] sampling failed:", e)
+
+# ---- Pairwise heatmaps (E[chi2] and PI) at the very end
+try:
+    ib = int(np.argmin(chi2s))
+    x_best = {p: float(X[ib, k]) for k, p in enumerate(param_order)}
+
+    # Expected chi^2 maps (smooth landscape)
+    pairwise_heatmap_plot(
+        GP, bounds, param_order, x_best,
+        pairs=None,        # or e.g. [("J3","J4"), ("J3","Jnnn")]
+        grid_n=80,
+        mode="Echi2",
+        X_hist=X, chi2_hist=chi2s,
+        out_prefix=fig_name + "_pair"
+    )
+    # Probability-of-Improvement maps
+    pairwise_heatmap_plot(
+        GP, bounds, param_order, x_best,
+        pairs=None,
+        grid_n=80,
+        mode="PI", eta=0.0,
+        X_hist=X, chi2_hist=chi2s,
+        out_prefix=fig_name + "_pair"
+    )
+    print("[Pairwise] heatmaps saved with prefix:", fig_name + "_pair")
+except Exception as e:
+    print("[Pairwise] plotting failed:", e)
 """
 end
