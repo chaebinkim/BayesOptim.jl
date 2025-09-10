@@ -195,7 +195,10 @@ for idx in range(start, max_iter + 1):
         axs[i].grid(True); axs[i].set_axisbelow(True)
     fig.align_labels()
     fig.savefig(fig_name + "_vs_params.png"); plt.close(fig)
-
+    
+if len(y) >= 2 and not hasattr(GP.model, "X_train_"):
+    GP.fit(X, y)
+    
 # ---- Posterior sampling uncertainty (ONLY at the very end)
 try:
     tr_final = {'L': L, 'auto_center': True} if len(y) > 2 else None
