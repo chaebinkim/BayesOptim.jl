@@ -227,16 +227,18 @@ try:
         mode="Echi2",
         X_hist=X, chi2_hist=chi2s,
         out_prefix=fig_name + "_pair"
+        save_data = True, data_format="npz", save_hist = False,
     )
     # Probability-of-Improvement maps
-    pairwise_heatmap_plot(
-        GP, bounds, param_order, x_best,
-        pairs=None,
-        grid_n=80,
-        mode="PI", eta=0.0,
-        X_hist=X, chi2_hist=chi2s,
-        out_prefix=fig_name + "_pair"
-    )
+    # pairwise_heatmap_plot(
+    #     GP, bounds, param_order, x_best,
+    #     pairs=None,
+    #     grid_n=80,
+    #     mode="PI", eta=0.0,
+    #     X_hist=X, chi2_hist=chi2s,
+    #     out_prefix=fig_name + "_pair"
+    #     save_data = False, data_format="npz", save_hist = False,
+    # )
     print("[Pairwise] heatmaps saved with prefix:", fig_name + "_pair")
 except Exception as e:
     print("[Pairwise] plotting failed:", e)
