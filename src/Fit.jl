@@ -226,7 +226,7 @@ try:
         grid_n=80,
         mode="Echi2",
         X_hist=X, chi2_hist=chi2s,
-        out_prefix=fig_name + "_pair"
+        out_prefix=fig_name + "_pair",
         save_data = True, data_format="npz", save_hist = False,
     )
     # Probability-of-Improvement maps
@@ -236,7 +236,7 @@ try:
     #     grid_n=80,
     #     mode="PI", eta=0.0,
     #     X_hist=X, chi2_hist=chi2s,
-    #     out_prefix=fig_name + "_pair"
+    #     out_prefix=fig_name + "_pair",
     #     save_data = False, data_format="npz", save_hist = False,
     # )
     print("[Pairwise] heatmaps saved with prefix:", fig_name + "_pair")
