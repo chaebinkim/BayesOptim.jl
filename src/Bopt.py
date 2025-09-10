@@ -305,13 +305,20 @@ def _grid_for_pair(bounds, param_order, pair, x_fixed, grid_n=80):
 def pairwise_heatmap_plot(model, bounds, param_order, x_fixed,
                           pairs=None, grid_n=80, mode="Echi2",
                           eta=0.0, X_hist=None, chi2_hist=None,
-                          out_prefix="pair", eps=1e-12):
+                          out_prefix="pair", eps=1e-12,
+                          save_data=False, data_format="npz", save_hist=False):
     """
-    Draw pairwise heatmaps.
+    Draw pairwise heatmaps and (optionally) save the underlying arrays.
+
     mode:
       - 'Echi2' : E[chi2] = exp(-mu + 0.5*std^2) - eps   (y ~ N(mu,std^2), chi2 = exp(-y)-eps)
       - 'PI'    : P(chi2 <= (1+eta)*chi2_best) == P(y >= y_thr)
+
+    If save_data:
+      data_format='npz'  -> <prefix>_<p>_vs_<q>_<mode>.npz  (xs, ys, Z, mu, std, meta…)
+      data_format='csv'  -> <prefix>_<p>_vs_<q>_<mode>.csv  (long format: p, q, Z, mu, std)
     """
+                              
     if pairs is None:
         pairs = list(itertools.combinations(param_order, 2))
 
@@ -337,10 +344,47 @@ def pairwise_heatmap_plot(model, bounds, param_order, x_fixed,
             Z = norm.cdf(z)
             label = "PI"
 
-        Z = Z.reshape(len(ys), len(xs))  # rows=y, cols=x
+        # reshape to 2D for saving/plotting
+        Z2  = Z.reshape(len(ys), len(xs))
+        MU2 = mu.reshape(len(ys), len(xs))
+        SD2 = std.reshape(len(ys), len(xs))
 
+        # ---------- (A) 데이터 저장 ----------
+        stem = f"{out_prefix}_{p}_vs_{q}_{mode}"
+        if save_data:
+            dfmt = str(data_format).lower()
+            if dfmt == "npz":
+                meta = {
+                    "pair": (p, q),
+                    "mode": mode,
+                    "label": label,
+                    "eta": float(eta),
+                    "param_order": np.array(param_order, dtype=object),
+                    "x_fixed": np.array([x_fixed[k] for k in param_order], dtype=float),
+                    "chi2_best": (None if chi2_best is None else float(chi2_best)),
+                }
+                np.savez(stem + ".npz",
+                         xs=np.asarray(xs), ys=np.asarray(ys),
+                         Z=Z2, mu=MU2, std=SD2,
+                         **meta)
+                if save_hist and (X_hist is not None) and (len(X_hist) > 0):
+                    hist = np.asarray(X_hist)[:, [ii, jj]]
+                    np.save(stem + "_hist.npy", hist)
+            elif dfmt == "csv":
+                # long format: columns -> p, q, Z, mu, std
+                XX, YY = np.meshgrid(xs, ys)  # shape (ny, nx)
+                arr = np.column_stack([XX.ravel(), YY.ravel(), Z2.ravel(), MU2.ravel(), SD2.ravel()])
+                header = f"{p},{q},Z,mu,std"
+                np.savetxt(stem + ".csv", arr, delimiter=",", header=header, comments="")
+                if save_hist and (X_hist is not None) and (len(X_hist) > 0):
+                    hist = np.asarray(X_hist)[:, [ii, jj]]
+                    np.savetxt(stem + "_hist.csv", hist, delimiter=",", header=f"{p},{q}", comments="")
+            else:
+                raise ValueError("data_format must be 'npz' or 'csv'")
+
+        # ---------- (B) 그림 저장 ----------
         fig, ax = plt.subplots(figsize=(4.2, 3.8), layout='constrained')
-        im = ax.imshow(Z, extent=[xs[0], xs[-1], ys[0], ys[-1]],
+        im = ax.imshow(Z2, extent=[xs[0], xs[-1], ys[0], ys[-1]],
                        origin='lower', aspect='auto')
         ax.set_xlabel(p); ax.set_ylabel(q)
         cb = fig.colorbar(im, ax=ax, shrink=0.84)
@@ -351,11 +395,11 @@ def pairwise_heatmap_plot(model, bounds, param_order, x_fixed,
             pts = np.asarray(X_hist)[:, [ii, jj]]
             ax.scatter(pts[:,0], pts[:,1], s=14, c='k', alpha=0.35, linewidths=0)
         ax.scatter([x_fixed[p]], [x_fixed[q]], s=160, marker='*',
-            facecolors='none', edgecolors='w', linewidths=1.8)
+                   facecolors='none', edgecolors='w', linewidths=1.8)
 
-        fig.savefig(f"{out_prefix}_{p}_vs_{q}_{mode}.png", dpi=200)
+        fig.savefig(stem + ".png", dpi=200)
         plt.close(fig)
-
+        
 # ------------------------------
 # Restart helper
 # ------------------------------
