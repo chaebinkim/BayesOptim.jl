@@ -354,19 +354,9 @@ def pairwise_heatmap_plot(model, bounds, param_order, x_fixed,
         if save_data:
             dfmt = str(data_format).lower()
             if dfmt == "npz":
-                meta = {
-                    "pair": (p, q),
-                    "mode": mode,
-                    "label": label,
-                    "eta": float(eta),
-                    "param_order": np.array(param_order, dtype=object),
-                    "x_fixed": np.array([x_fixed[k] for k in param_order], dtype=float),
-                    "chi2_best": (None if chi2_best is None else float(chi2_best)),
-                }
                 np.savez(stem + ".npz",
                          xs=np.asarray(xs), ys=np.asarray(ys),
-                         Z=Z2, mu=MU2, std=SD2,
-                         **meta)
+                         Z=Z2, mu=MU2, std=SD2)
                 if save_hist and (X_hist is not None) and (len(X_hist) > 0):
                     hist = np.asarray(X_hist)[:, [ii, jj]]
                     np.save(stem + "_hist.npy", hist)
