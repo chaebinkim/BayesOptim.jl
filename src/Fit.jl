@@ -205,7 +205,7 @@ try:
     summary = optimal_std_via_sampling(
         GP, bounds, param_order,
         X=X, y=y,
-        n_funcs=200, n_cand=2000,
+        n_funcs=400, n_cand=8000,
         trust_region=tr_final, eps=1e-12
     )
     print("[Uncertainty@final] y* std=%.4g  chi2* std=%.4g" % (summary["y_star_std"], summary["chi2_star_std"]))
