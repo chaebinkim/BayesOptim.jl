@@ -63,9 +63,25 @@ class UnitSpaceGP:
         X_u = self._to_unit(X)
         return self.model.fit(X_u, y)
 
-    def predict(self, X, return_std=True):
+    def predict(self, X, return_std=False, return_cov=False):
+        """
+        - return_cov=True  -> (mu, cov) 반환  (noise-free predictive covariance)
+        - return_std=True  -> (mu, std) 반환
+        - 둘 다 False      -> mu만 반환
+        주의: return_std와 return_cov를 동시에 True로 줄 수 없습니다.
+        """
+        if return_std and return_cov:
+            raise ValueError("Only one of return_std or return_cov can be True.")
         X_u = self._to_unit(X)
-        return self.model.predict(X_u, return_std=return_std)
+        if return_cov:
+            mu, cov = self.model.predict(X_u, return_cov=True)
+            return np.asarray(mu), np.asarray(cov)
+        elif return_std:
+            mu, std = self.model.predict(X_u, return_std=True)
+            return np.asarray(mu), np.asarray(std)
+        else:
+            mu = self.model.predict(X_u, return_std=False)
+            return np.asarray(mu)
 
     def sample_y(self, X, n_samples=1, random_state=None):
         X_u = self._to_unit(X)
