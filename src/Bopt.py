@@ -63,25 +63,9 @@ class UnitSpaceGP:
         X_u = self._to_unit(X)
         return self.model.fit(X_u, y)
 
-    def predict(self, X, return_std=False, return_cov=False):
-        """
-        - return_cov=True  -> (mu, cov) 반환  (noise-free predictive covariance)
-        - return_std=True  -> (mu, std) 반환
-        - 둘 다 False      -> mu만 반환
-        주의: return_std와 return_cov를 동시에 True로 줄 수 없습니다.
-        """
-        if return_std and return_cov:
-            raise ValueError("Only one of return_std or return_cov can be True.")
+    def predict(self, X, return_std=True):
         X_u = self._to_unit(X)
-        if return_cov:
-            mu, cov = self.model.predict(X_u, return_cov=True)
-            return np.asarray(mu), np.asarray(cov)
-        elif return_std:
-            mu, std = self.model.predict(X_u, return_std=True)
-            return np.asarray(mu), np.asarray(std)
-        else:
-            mu = self.model.predict(X_u, return_std=False)
-            return np.asarray(mu)
+        return self.model.predict(X_u, return_std=return_std)
 
     def sample_y(self, X, n_samples=1, random_state=None):
         X_u = self._to_unit(X)
@@ -264,37 +248,26 @@ def Opt_Acquisition(X, y_obs, model, bounds, explore=0.01, n_cand=4096, k_refine
 # Posterior sampling-based uncertainty of optimum
 # ------------------------------
 def optimal_std_via_sampling(model, bounds, param_order, X=None, y=None,
-                             n_funcs=200, n_cand=2000, trust_region=None,
-                             rng=None, eps=1e-12, posterior_seed=12345,
-                             noise_free=True, global_scope=False):
+                             n_funcs=200, n_cand=2000, trust_region=None, rng=None, eps=1e-12):
     if rng is None:
         rng = np.random.default_rng()
-    # (1) 신뢰영역 사용 여부
+    # Resolve trust-region (optional)
     tr = None
-    if (not global_scope) and (trust_region is not None):
+    if trust_region is not None:
         if trust_region.get('auto_center', False) and (X is not None) and (y is not None) and (len(y) > 0):
-            X = np.atleast_2d(X); y = np.asarray(y).reshape(-1)
-            best_idx = int(np.argmax(y)); x_best = X[best_idx:best_idx+1, :]
+            X = _as_2d(X); y = np.asarray(y, dtype=float).reshape(-1)
+            best_idx = int(np.argmax(y))
+            x_best = X[best_idx:best_idx+1, :]
             center_u = to_unit_batch(bounds, param_order, x_best).reshape(-1)
             tr = {'L': float(trust_region.get('L', 1.0)), 'center_u': center_u}
         elif 'center_u' in trust_region:
             tr = {'L': float(trust_region.get('L', 1.0)),
                   'center_u': np.asarray(trust_region['center_u'], dtype=float).reshape(-1)}
-    # (2) 후보 생성
+    # Candidate set & samples
     XR, _ = _sample_candidates(bounds, param_order, n_cand=n_cand, trust_region=tr, rng=rng)
-    # (3) 노이즈 없는 포스터리어에서 샘플
-    if noise_free:
-        mu, cov = model.predict(XR, return_cov=True)  # noise-free predictive cov
-        cov = np.asarray(cov, dtype=float)
-        # 수치 안정화
-        cov.flat[::cov.shape[0]+1] += 1e-10
-        rng2 = np.random.default_rng(posterior_seed)
-        YS = rng2.multivariate_normal(mean=mu, cov=cov, size=int(n_funcs)).T  # (n_cand, n_funcs)
-    else:
-        YS = model.sample_y(XR, n_samples=int(n_funcs), random_state=posterior_seed)
-        if YS.ndim == 1: YS = YS[:, None]
-        if YS.shape[0] != XR.shape[0]: YS = YS.T
-    # (4) 각 샘플 함수에서의 최적
+    YS = model.sample_y(XR, n_samples=int(n_funcs), random_state=None)
+    if YS.ndim == 1: YS = YS[:, None]
+    if YS.shape[0] != XR.shape[0]: YS = YS.T
     idx_max = np.argmax(YS, axis=0)
     y_star = YS[idx_max, np.arange(YS.shape[1])]
     X_star = XR[idx_max, :]
@@ -308,7 +281,6 @@ def optimal_std_via_sampling(model, bounds, param_order, X=None, y=None,
         "X_star_std":     np.std(X_star, axis=0, ddof=1),
     }
     return out
-
 
 # ------------------------------
 # Pairwise heatmaps (E[chi2] / PI)
