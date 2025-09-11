@@ -205,15 +205,9 @@ try:
     summary = optimal_std_via_sampling(
         GP, bounds, param_order,
         X=X, y=y,
-        n_funcs=500,         # 샘플 수↑ → Monte Carlo 노이즈↓
-        n_cand=5000,         # 후보 수↑ → 전역 근사↑
-        trust_region=None,   # or {'L':1.0} ; 전역 스코프 권장
-        eps=1e-12,
-        posterior_seed=20250910,
-        noise_free=True,
-        global_scope=True,
+        n_funcs=200, n_cand=2000,
+        trust_region=tr_final, eps=1e-12
     )
-
     print("[Uncertainty@final] y* std=%.4g  chi2* std=%.4g" % (summary["y_star_std"], summary["chi2_star_std"]))
     with open(file_name + "_uncert.json", "w") as f:
         json.dump({k:(v.tolist() if hasattr(v,'tolist') else v) for k,v in summary.items()}, f)
