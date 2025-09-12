@@ -490,16 +490,19 @@ def levelset_region_sampling(model, bounds, param_order,
     # 4) 박스 내부 균일 샘플 & GP 예측
     S = rng.uniform(low=box_lo, high=box_hi, size=(int(n_samples), d))
     # 배치 예측(여기선 S만 예측하므로 배치 분할 불필요하지만 인터페이스 유지)
+    K = min(100, X_hist.shape[0])
+    topK = np.argsort(chi2_hist)[:K]
+    S = np.vstack([S, X_hist[topK]])
     mu_s, std_s = model.predict(S, return_std=True)
     mu_s = np.asarray(mu_s).reshape(-1); std_s = np.asarray(std_s).reshape(-1)
-    chi2_mean_s = np.exp(-mu_s + 0.5*std_s*std_s) - float(eps)
+    chi2_est_s = np.exp(-mu_s) - float(eps)
     if q is None:
         chi2_q_s_arr = np.full(S.shape[0], np.nan, dtype=np.float64)
         method = "DATA_BOX:E"
 
     np.savez(outfile,
              samples=S,
-             chi2_pred_mean=chi2_mean_s,
+             chi2_pred_mean=chi2_est_s,
              chi2_min=float(chi2_min),
              delta=float(delta),
              threshold=float(thr),
