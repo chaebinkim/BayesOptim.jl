@@ -282,14 +282,12 @@ except Exception as e:
 chi2_min = float(np.min(chi2s))
 out = levelset_region_sampling(
     GP, bounds, param_order,
-    chi2_min=chi2_min,
-    delta=delta,            # 옵션: 1 대신 다른 값
-    n_scan=120_000,       # 전역 스캔 점 수
-    n_samples=500,        # 저장할 샘플 수
-    q=0.95,               # 보수적: 95% 분위수 기준. 기대값 쓰려면 None
-    seed=20250911,        # 재현성
-    pad=0.02,
-    batch=6000,
+    chi2_min=chi2_min_obs,   # 생략해도 chi2s.min() 사용
+    delta=1.0,               # 원하는 값으로
+    n_samples=500,
+    X_hist=X, chi2_hist=chi2s,
+    q=None,                  # 저장값을 기대값 기준으로. 보수적이면 0.95 등
+    seed=20250912,
     outfile=fig_name + "_levelset_samples.npz",
 )
 print("[LevelSet] saved:", out["outfile"])
