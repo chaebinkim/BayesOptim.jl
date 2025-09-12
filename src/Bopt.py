@@ -432,29 +432,33 @@ def pairwise_heatmap_plot(model, bounds, param_order, x_fixed,
 def levelset_region_sampling(model, bounds, param_order,
                              chi2_min=None, delta=1.0,
                              n_samples=500,           # 저장할 샘플 수
-                             X_hist=None, chi2_hist=None,  # ← 관측 이력 (필수)
+                             X_hist=None, chi2_hist=None,  # 관측 이력 (필수)
                              eps=1e-12, seed=None, pad=0.02,
                              outfile="posterior_levelset_samples.npz",
+                             # --- new: posterior sampling 옵션 ---
+                             posterior=False,         # True면 포스터리어 샘플링 사용
+                             n_funcs=400,             # 함수 실현 개수
+                             posterior_seed=None,     # 샘플링 시드(재현성)
+                             save_all_draws=False,    # True면 모든 실현(큰 파일!) 저장
                              q=None, batch=5000):
     """
-    최종 GP로 'χ² <= chi2_min + delta' 레벨셋 근사:
-      1) 전역에서 n_scan개 샘플 -> GP로 χ² 예측(평균 또는 분위수)
-      2) 임계 이하인 점들만 모아 축별 min/max로 직사각형 박스 정의(약간 pad)
-      3) 박스 안에서 균일 샘플 n_samples개 뽑아 χ² 예측 후 .npz 저장
+    레벨셋 박스는 관측 이력으로 정의(χ² ≤ chi2_min+δ). 박스 안에서 균일 샘플 S를 뽑아:
+      - posterior=False: plug-in/mean 기반 χ² 추정
+      - posterior=True : 노이즈-프리 포스터리어에서 함수 실현 Y ~ N(μ,Σ) 샘플링 → χ² 분포 요약 저장
 
-    저장 내용:
-      - samples: (n_samples, d) 원공간 좌표
-      - chi2_pred_mean: (n_samples,) E[χ²]
-      - chi2_pred_q: (n_samples,) q-분위 χ² (q가 None이면 None)
-      - box: (d,2) [lo,hi]
-      - 기타 메타데이터
+    저장(.npz):
+      samples (N,d)
+      box (d,2)
+      posterior=False → chi2_plugin, chi2_mean
+      posterior=True  → chi2_ps_median, chi2_ps_mean, chi2_ps_q05, chi2_ps_q95, chi2_ps_min
+                         (옵션 save_all_draws=True → chi2_draws (N, n_funcs))
+      메타 숫자 필드(Unicode 문자열 없음)
     """
+    import numpy as np
 
-    if q is not None:
-        from scipy.stats import norm
-        zq = float(norm.ppf(q))
+    if X_hist is None or chi2_hist is None:
+        raise ValueError("X_hist와 chi2_hist를 제공해야 합니다 (관측 이력 기반 박스).")
 
-    # 기본 준비
     rng = np.random.default_rng(seed)
     d = len(param_order)
     lo = np.array([bounds[p][0] for p in param_order], dtype=float)
@@ -469,47 +473,90 @@ def levelset_region_sampling(model, bounds, param_order,
     # 2) 임계 이내 관측점 선택
     mask = (chi2_hist <= thr) & np.isfinite(chi2_hist)
     pts = X_hist[mask]
-
-    # 방어적 폴백: 너무 적으면(0개 또는 극소수) 상위 K개로 완화
     if pts.shape[0] < max(2*d, 5):
         K = max(3*max(2*d, 5), min(2000, X_hist.shape[0]))
         idx = np.argpartition(chi2_hist, K)[:K]
         pts = X_hist[idx]
 
-    # 3) 축별 bbox (+ pad), bounds에 클램프. 폭이 0이면 소폭 확장
+    # 3) 축별 bbox (+ pad), bounds 클램프
     width = (hi - lo)
     box_lo = np.maximum(lo, np.min(pts, axis=0) - width*float(pad))
     box_hi = np.minimum(hi, np.max(pts, axis=0) + width*float(pad))
-    # zero-width 보정
     epsw = 1e-9 + 0.01 * width
     tight = (box_hi - box_lo) < 1e-12
     box_lo[tight] = np.maximum(lo[tight], box_lo[tight] - 0.5*epsw[tight])
     box_hi[tight] = np.minimum(hi[tight], box_hi[tight] + 0.5*epsw[tight])
     box = np.vstack([box_lo, box_hi]).T  # (d,2)
 
-    # 4) 박스 내부 균일 샘플 & GP 예측
+    # 4) 박스 내부 균일 샘플
     S = rng.uniform(low=box_lo, high=box_hi, size=(int(n_samples), d))
-    # 배치 예측(여기선 S만 예측하므로 배치 분할 불필요하지만 인터페이스 유지)
-    K = min(100, X_hist.shape[0])
-    topK = np.argsort(chi2_hist)[:K]
-    S = np.vstack([S, X_hist[topK]])
-    mu_s, std_s = model.predict(S, return_cov=True)
-    mu_s = np.asarray(mu_s).reshape(-1); std_s = np.asarray(std_s).reshape(-1)
-    chi2_est_s = np.exp(-mu_s) - float(eps)
-    if q is None:
-        chi2_q_s_arr = np.full(S.shape[0], np.nan, dtype=np.float64)
-        method = "DATA_BOX:E"
 
-    np.savez(outfile,
-             samples=S,
-             chi2_pred_mean=chi2_est_s,
-             chi2_min=float(chi2_min),
-             delta=float(delta),
-             threshold=float(thr),
-             n_samples=int(n_samples),
-             box=box,
-             seed=seed)
+    # 5) χ² 계산
+    out = {
+        "samples": S.astype(np.float64),
+        "box": box.astype(np.float64),
+        "chi2_min": float(cmin),
+        "delta": float(delta),
+        "threshold": float(thr),
+        "n_samples": int(n_samples),
+        "posterior": int(bool(posterior)),
+        "n_funcs": int(n_funcs if posterior else 0),
+        "seed": int(seed) if (seed is not None) else -1,
+        "posterior_seed": int(posterior_seed) if (posterior_seed is not None) else -1,
+        "save_all_draws": int(bool(save_all_draws)),
+    }
 
+    if not posterior:
+        # ------- plug-in/mean 기반 (기존 방식) -------
+        mu_s, std_s = model.predict(S, return_std=True)
+        mu_s = np.asarray(mu_s).reshape(-1); std_s = np.asarray(std_s).reshape(-1)
+        chi2_plugin = np.exp(-mu_s) - float(eps)                      # median/plug-in
+        chi2_mean   = np.exp(-mu_s + 0.5*std_s*std_s) - float(eps)    # E[χ²]
+        out["chi2_plugin"] = chi2_plugin.astype(np.float64)
+        out["chi2_mean"]   = chi2_mean.astype(np.float64)
+
+    else:
+        # ------- 포스터리어 샘플링 (노이즈-프리, return_cov=True) -------
+        # 공분산 수치안정화(jitter) 루프
+        mu, cov = model.predict(S, return_cov=True)  # UnitSpaceGP가 지원해야 함
+        mu = np.asarray(mu, dtype=float).reshape(-1)
+        cov = np.asarray(cov, dtype=float)
+
+        ok = False
+        rng_ps = np.random.default_rng(posterior_seed)
+        for k in range(6):
+            try:
+                YS = rng_ps.multivariate_normal(mean=mu, cov=cov, size=int(n_funcs))  # (n_funcs, N)
+                ok = True
+                break
+            except np.linalg.LinAlgError:
+                jitter = (10.0**k) * 1e-10
+                cov = cov + jitter * np.eye(cov.shape[0], dtype=float)
+        if not ok:
+            # 최후의 수단: 대각선만 사용
+            std = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+            YS = mu[None, :] + std[None, :] * rng_ps.standard_normal(size=(int(n_funcs), mu.size))
+
+        CH = np.maximum(np.exp(-YS) - float(eps), 0.0)   # (n_funcs, N)
+        # 요약 통계(축=0: 함수 실현)
+        chi2_ps_mean   = np.mean(CH, axis=0)
+        chi2_ps_median = np.median(CH, axis=0)
+        chi2_ps_q05    = np.quantile(CH, 0.05, axis=0)
+        chi2_ps_q95    = np.quantile(CH, 0.95, axis=0)
+        chi2_ps_min    = np.min(CH, axis=0)
+
+        out["chi2_ps_mean"]   = chi2_ps_mean.astype(np.float64)
+        out["chi2_ps_median"] = chi2_ps_median.astype(np.float64)
+        out["chi2_ps_q05"]    = chi2_ps_q05.astype(np.float64)
+        out["chi2_ps_q95"]    = chi2_ps_q95.astype(np.float64)
+        out["chi2_ps_min"]    = chi2_ps_min.astype(np.float64)
+
+        if save_all_draws:
+            # (N, n_funcs)로 저장 — 파일 커질 수 있음!
+            out["chi2_draws"] = CH.T.astype(np.float64)
+
+    # 6) 저장(숫자만 저장 → Unicode dtype 문제 없음)
+    np.savez(outfile, **out)
     return {"outfile": outfile, "box": box, "n_kept_for_box": int(pts.shape[0]),
             "threshold": thr}
 
