@@ -493,7 +493,7 @@ def levelset_region_sampling(model, bounds, param_order,
     K = min(100, X_hist.shape[0])
     topK = np.argsort(chi2_hist)[:K]
     S = np.vstack([S, X_hist[topK]])
-    mu_s, std_s = model.predict(S, return_std=True)
+    mu_s, std_s = model.predict(S, return_cov=True)
     mu_s = np.asarray(mu_s).reshape(-1); std_s = np.asarray(std_s).reshape(-1)
     chi2_est_s = np.exp(-mu_s) - float(eps)
     if q is None:
