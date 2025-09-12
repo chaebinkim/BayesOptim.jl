@@ -29,6 +29,7 @@ max_iter = int($max_iter)
 file_name = $file_name
 fig_name = $fig_name
 ref_point = $ref_point
+delta = $delta
 
 # ---- Seeds for reproducibility ----
 seed_base = 12345                    # 전체 고정 시드 베이스
