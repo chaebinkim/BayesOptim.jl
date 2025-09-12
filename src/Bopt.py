@@ -517,10 +517,8 @@ def levelset_region_sampling(model, bounds, param_order,
         chi2_q_s = np.exp(-mu_s + zq*std_s) - float(eps)
 
     np.savez(outfile,
-             param_order=np.array(param_order),
              samples=S,
              chi2_pred_mean=chi2_mean_s,
-             chi2_pred_q=chi2_q_s,
              chi2_min=float(chi2_min),
              delta=float(delta),
              threshold=float(thr),
