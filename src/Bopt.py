@@ -429,21 +429,13 @@ def pairwise_heatmap_plot(model, bounds, param_order, x_fixed,
 # ------------------------------
 # levelset_region_sampling
 # ------------------------------
-def _bounds_arrays(bounds, param_order):
-    import numpy as np
-    lo = np.array([bounds[p][0] for p in param_order], dtype=float)
-    hi = np.array([bounds[p][1] for p in param_order], dtype=float)
-    return lo, hi
-
 def levelset_region_sampling(model, bounds, param_order,
-                             chi2_min, delta=1.0,
-                             n_scan=100_000,        # 전역 탐색 점 수
-                             n_samples=500,         # 결과로 뽑아 저장할 개수
-                             q=0.95,                # 보수적(상위 q-분위) 임계 사용. None이면 E[χ²] 기준
-                             eps=1e-12,
-                             seed=None, pad=0.02,   # pad: 박스 여유 비율
-                             batch=5000,            # 배치 예측 크기
-                             outfile="posterior_levelset_samples.npz"):
+                             chi2_min=None, delta=1.0,
+                             n_samples=500,           # 저장할 샘플 수
+                             X_hist=None, chi2_hist=None,  # ← 관측 이력 (필수)
+                             eps=1e-12, seed=None, pad=0.02,
+                             outfile="posterior_levelset_samples.npz",
+                             q=None, batch=5000):
     """
     최종 GP로 'χ² <= chi2_min + delta' 레벨셋 근사:
       1) 전역에서 n_scan개 샘플 -> GP로 χ² 예측(평균 또는 분위수)
@@ -462,59 +454,48 @@ def levelset_region_sampling(model, bounds, param_order,
         from scipy.stats import norm
         zq = float(norm.ppf(q))
 
+    # 기본 준비
     rng = np.random.default_rng(seed)
     d = len(param_order)
-    lo, hi = _bounds_arrays(bounds, param_order)
+    lo = np.array([bounds[p][0] for p in param_order], dtype=float)
+    hi = np.array([bounds[p][1] for p in param_order], dtype=float)
+    X_hist = np.asarray(X_hist, dtype=float).reshape(-1, d)
+    chi2_hist = np.asarray(chi2_hist, dtype=float).reshape(-1)
 
-    # 1) 전역 스캔 (배치 예측)
-    XR_list, mu_list, std_list = [], [], []
-    remain = int(n_scan)
-    while remain > 0:
-        m = min(remain, int(batch))
-        Xb = rng.uniform(low=lo, high=hi, size=(m, d))
-        mu, std = model.predict(Xb, return_std=True)
-        XR_list.append(Xb)
-        mu_list.append(np.asarray(mu).reshape(-1))
-        std_list.append(np.asarray(std).reshape(-1))
-        remain -= m
+    # 1) 임계값: 관측데이터에서의 최솟값 + δ
+    cmin = np.min(chi2_hist) if (chi2_min is None) else float(chi2_min)
+    thr = float(cmin) + float(delta)
 
-    XR  = np.vstack(XR_list)                 # (n_scan, d)
-    mu  = np.concatenate(mu_list)            # GP 잠재값 평균
-    std = np.concatenate(std_list)           # GP 잠재값 표준편차
+    # 2) 임계 이내 관측점 선택
+    mask = (chi2_hist <= thr) & np.isfinite(chi2_hist)
+    pts = X_hist[mask]
 
-    # χ² 예측: y ~ N(μ,σ²), χ² = exp(-y) - eps  →  E[χ²] = exp(-μ + 0.5σ²)-eps
-    chi2_E = np.exp(-mu + 0.5*std*std) - float(eps)
-    if q is None:
-        chi2_score = chi2_E
-        method = "E"  # 기대값 기준
-    else:
-        chi2_Q = np.exp(-mu + zq*std) - float(eps)  # 상위 q-분위(보수적)
-        chi2_score = chi2_Q
-        method = f"Q{q}"
+    # 방어적 폴백: 너무 적으면(0개 또는 극소수) 상위 K개로 완화
+    if pts.shape[0] < max(2*d, 5):
+        K = max(3*max(2*d, 5), min(2000, X_hist.shape[0]))
+        idx = np.argpartition(chi2_hist, K)[:K]
+        pts = X_hist[idx]
 
-    thr = float(chi2_min) + float(delta)
-    mask = (chi2_score <= thr)
-
-    # 방어적 폴백: 하나도 안 잡히면 chi2_score가 작은 상위 K개로 완화
-    if not np.any(mask):
-        K = min(2000, XR.shape[0]//20 + 1)
-        idx = np.argpartition(chi2_score, K)[:K]
-        mask = np.zeros(XR.shape[0], dtype=bool); mask[idx] = True
-
-    region_pts = XR[mask]
-    # 2) 축별 bounding box + pad
-    box_lo = np.maximum(lo, region_pts.min(axis=0) - (hi - lo)*float(pad))
-    box_hi = np.minimum(hi, region_pts.max(axis=0) + (hi - lo)*float(pad))
+    # 3) 축별 bbox (+ pad), bounds에 클램프. 폭이 0이면 소폭 확장
+    width = (hi - lo)
+    box_lo = np.maximum(lo, np.min(pts, axis=0) - width*float(pad))
+    box_hi = np.minimum(hi, np.max(pts, axis=0) + width*float(pad))
+    # zero-width 보정
+    epsw = 1e-9 + 0.01 * width
+    tight = (box_hi - box_lo) < 1e-12
+    box_lo[tight] = np.maximum(lo[tight], box_lo[tight] - 0.5*epsw[tight])
+    box_hi[tight] = np.minimum(hi[tight], box_hi[tight] + 0.5*epsw[tight])
     box = np.vstack([box_lo, box_hi]).T  # (d,2)
 
-    # 3) 박스 내부 균일 샘플링 & χ² 예측 저장값 계산
+    # 4) 박스 내부 균일 샘플 & GP 예측
     S = rng.uniform(low=box_lo, high=box_hi, size=(int(n_samples), d))
+    # 배치 예측(여기선 S만 예측하므로 배치 분할 불필요하지만 인터페이스 유지)
     mu_s, std_s = model.predict(S, return_std=True)
     mu_s = np.asarray(mu_s).reshape(-1); std_s = np.asarray(std_s).reshape(-1)
     chi2_mean_s = np.exp(-mu_s + 0.5*std_s*std_s) - float(eps)
-    chi2_q_s = None
-    if q is not None:
-        chi2_q_s = np.exp(-mu_s + zq*std_s) - float(eps)
+    if q is None:
+        chi2_q_s_arr = np.full(S.shape[0], np.nan, dtype=np.float64)
+        method = "DATA_BOX:E"
 
     np.savez(outfile,
              samples=S,
@@ -522,13 +503,12 @@ def levelset_region_sampling(model, bounds, param_order,
              chi2_min=float(chi2_min),
              delta=float(delta),
              threshold=float(thr),
-             n_scan=int(n_scan),
              n_samples=int(n_samples),
              box=box,
              seed=seed)
 
-    return {"outfile": outfile, "box": box, "n_scan": int(n_scan),
-            "n_kept_for_box": int(region_pts.shape[0])}
+    return {"outfile": outfile, "box": box, "n_kept_for_box": int(pts.shape[0]),
+            "threshold": thr}
 
 
 # ------------------------------
