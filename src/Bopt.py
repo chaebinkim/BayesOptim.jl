@@ -15,6 +15,7 @@ import numpy as np
 import warnings
 import itertools
 import matplotlib.pyplot as plt
+from math import ceil
 from scipy.optimize import minimize
 from scipy.stats import norm
 from scipy.spatial.distance import cdist
@@ -456,8 +457,7 @@ def levelset_region_sampling(model, bounds, param_order,
       - box: (d,2) [lo,hi]
       - 기타 메타데이터
     """
-    import numpy as np
-    from math import ceil
+
     if q is not None:
         from scipy.stats import norm
         zq = float(norm.ppf(q))
@@ -524,7 +524,6 @@ def levelset_region_sampling(model, bounds, param_order,
              chi2_min=float(chi2_min),
              delta=float(delta),
              threshold=float(thr),
-             method=method,
              n_scan=int(n_scan),
              n_samples=int(n_samples),
              box=box,
