@@ -422,7 +422,116 @@ def pairwise_heatmap_plot(model, bounds, param_order, x_fixed,
 
         fig.savefig(stem + ".png", dpi=200)
         plt.close(fig)
-        
+
+# ------------------------------
+# levelset_region_sampling
+# ------------------------------
+def _bounds_arrays(bounds, param_order):
+    import numpy as np
+    lo = np.array([bounds[p][0] for p in param_order], dtype=float)
+    hi = np.array([bounds[p][1] for p in param_order], dtype=float)
+    return lo, hi
+
+def levelset_region_sampling(model, bounds, param_order,
+                             chi2_min, delta=1.0,
+                             n_scan=100_000,        # 전역 탐색 점 수
+                             n_samples=500,         # 결과로 뽑아 저장할 개수
+                             q=0.95,                # 보수적(상위 q-분위) 임계 사용. None이면 E[χ²] 기준
+                             eps=1e-12,
+                             seed=None, pad=0.02,   # pad: 박스 여유 비율
+                             batch=5000,            # 배치 예측 크기
+                             outfile="posterior_levelset_samples.npz"):
+    """
+    최종 GP로 'χ² <= chi2_min + delta' 레벨셋 근사:
+      1) 전역에서 n_scan개 샘플 -> GP로 χ² 예측(평균 또는 분위수)
+      2) 임계 이하인 점들만 모아 축별 min/max로 직사각형 박스 정의(약간 pad)
+      3) 박스 안에서 균일 샘플 n_samples개 뽑아 χ² 예측 후 .npz 저장
+
+    저장 내용:
+      - samples: (n_samples, d) 원공간 좌표
+      - chi2_pred_mean: (n_samples,) E[χ²]
+      - chi2_pred_q: (n_samples,) q-분위 χ² (q가 None이면 None)
+      - box: (d,2) [lo,hi]
+      - 기타 메타데이터
+    """
+    import numpy as np
+    from math import ceil
+    if q is not None:
+        from scipy.stats import norm
+        zq = float(norm.ppf(q))
+
+    rng = np.random.default_rng(seed)
+    d = len(param_order)
+    lo, hi = _bounds_arrays(bounds, param_order)
+
+    # 1) 전역 스캔 (배치 예측)
+    XR_list, mu_list, std_list = [], [], []
+    remain = int(n_scan)
+    while remain > 0:
+        m = min(remain, int(batch))
+        Xb = rng.uniform(low=lo, high=hi, size=(m, d))
+        mu, std = model.predict(Xb, return_std=True)
+        XR_list.append(Xb)
+        mu_list.append(np.asarray(mu).reshape(-1))
+        std_list.append(np.asarray(std).reshape(-1))
+        remain -= m
+
+    XR  = np.vstack(XR_list)                 # (n_scan, d)
+    mu  = np.concatenate(mu_list)            # GP 잠재값 평균
+    std = np.concatenate(std_list)           # GP 잠재값 표준편차
+
+    # χ² 예측: y ~ N(μ,σ²), χ² = exp(-y) - eps  →  E[χ²] = exp(-μ + 0.5σ²)-eps
+    chi2_E = np.exp(-mu + 0.5*std*std) - float(eps)
+    if q is None:
+        chi2_score = chi2_E
+        method = "E"  # 기대값 기준
+    else:
+        chi2_Q = np.exp(-mu + zq*std) - float(eps)  # 상위 q-분위(보수적)
+        chi2_score = chi2_Q
+        method = f"Q{q}"
+
+    thr = float(chi2_min) + float(delta)
+    mask = (chi2_score <= thr)
+
+    # 방어적 폴백: 하나도 안 잡히면 chi2_score가 작은 상위 K개로 완화
+    if not np.any(mask):
+        K = min(2000, XR.shape[0]//20 + 1)
+        idx = np.argpartition(chi2_score, K)[:K]
+        mask = np.zeros(XR.shape[0], dtype=bool); mask[idx] = True
+
+    region_pts = XR[mask]
+    # 2) 축별 bounding box + pad
+    box_lo = np.maximum(lo, region_pts.min(axis=0) - (hi - lo)*float(pad))
+    box_hi = np.minimum(hi, region_pts.max(axis=0) + (hi - lo)*float(pad))
+    box = np.vstack([box_lo, box_hi]).T  # (d,2)
+
+    # 3) 박스 내부 균일 샘플링 & χ² 예측 저장값 계산
+    S = rng.uniform(low=box_lo, high=box_hi, size=(int(n_samples), d))
+    mu_s, std_s = model.predict(S, return_std=True)
+    mu_s = np.asarray(mu_s).reshape(-1); std_s = np.asarray(std_s).reshape(-1)
+    chi2_mean_s = np.exp(-mu_s + 0.5*std_s*std_s) - float(eps)
+    chi2_q_s = None
+    if q is not None:
+        chi2_q_s = np.exp(-mu_s + zq*std_s) - float(eps)
+
+    np.savez(outfile,
+             param_order=np.array(param_order),
+             samples=S,
+             chi2_pred_mean=chi2_mean_s,
+             chi2_pred_q=chi2_q_s,
+             chi2_min=float(chi2_min),
+             delta=float(delta),
+             threshold=float(thr),
+             method=method,
+             n_scan=int(n_scan),
+             n_samples=int(n_samples),
+             box=box,
+             seed=seed)
+
+    return {"outfile": outfile, "box": box, "n_scan": int(n_scan),
+            "n_kept_for_box": int(region_pts.shape[0])}
+
+
 # ------------------------------
 # Restart helper
 # ------------------------------

@@ -278,3 +278,20 @@ except Exception as e:
     print("[Pairwise] plotting failed:", e)
 """
 end
+
+# ---- 레벨셋 샘플링 & 저장 ----
+chi2_min = float(np.min(chi2s))
+out = levelset_region_sampling(
+    GP, bounds, param_order,
+    chi2_min=chi2_min,
+    delta=1.0,            # 옵션: 1 대신 다른 값
+    n_scan=120_000,       # 전역 스캔 점 수
+    n_samples=500,        # 저장할 샘플 수
+    q=0.95,               # 보수적: 95% 분위수 기준. 기대값 쓰려면 None
+    seed=20250911,        # 재현성
+    pad=0.02,
+    batch=6000,
+    outfile=fig_name + "_levelset_samples.npz",
+)
+print("[LevelSet] saved:", out["outfile"])
+print("[LevelSet] box (lo,hi) per dim:\n", out["box"])
