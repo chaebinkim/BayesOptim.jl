@@ -1,4 +1,4 @@
-function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "chi2", ref_point = nothing)
+function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "chi2", ref_point = nothing, delta = 1.0)
     DIR = @__DIR__
     @pyinclude(DIR*"/Bopt.py")
     py"""
@@ -282,7 +282,7 @@ chi2_min = float(np.min(chi2s))
 out = levelset_region_sampling(
     GP, bounds, param_order,
     chi2_min=chi2_min,
-    delta=1.0,            # 옵션: 1 대신 다른 값
+    delta=delta,            # 옵션: 1 대신 다른 값
     n_scan=120_000,       # 전역 스캔 점 수
     n_samples=500,        # 저장할 샘플 수
     q=0.95,               # 보수적: 95% 분위수 기준. 기대값 쓰려면 None
