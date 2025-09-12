@@ -276,8 +276,6 @@ try:
     print("[Pairwise] heatmaps saved with prefix:", fig_name + "_pair")
 except Exception as e:
     print("[Pairwise] plotting failed:", e)
-"""
-end
 
 # ---- 레벨셋 샘플링 & 저장 ----
 chi2_min = float(np.min(chi2s))
@@ -295,3 +293,6 @@ out = levelset_region_sampling(
 )
 print("[LevelSet] saved:", out["outfile"])
 print("[LevelSet] box (lo,hi) per dim:\n", out["box"])
+"""
+end
+
