@@ -63,8 +63,10 @@ class UnitSpaceGP:
         X_u = self._to_unit(X)
         return self.model.fit(X_u, y)
 
-    def predict(self, X, return_std=True):
+    def predict(self, X, return_std=True, return_cov=False):
         X_u = self._to_unit(X)
+        if return_cov:
+            return self.model.predict(X_u, return_cov=True)
         return self.model.predict(X_u, return_std=return_std)
 
     def sample_y(self, X, n_samples=1, random_state=None):
