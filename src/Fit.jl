@@ -287,7 +287,7 @@ out = levelset_region_sampling(
     n_samples=500,
     X_hist=X, chi2_hist=chi2s,
     q=None,                  # 저장값을 기대값 기준으로. 보수적이면 0.95 등
-    seed=20250912,
+    seed=_seed,
     outfile=fig_name + "_levelset_samples.npz",
 )
 print("[LevelSet] saved:", out["outfile"])
