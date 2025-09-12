@@ -476,38 +476,20 @@ def levelset_region_sampling(model, bounds, param_order,
         idx = np.argpartition(chi2_hist, K)[:K]
         pts = X_hist[idx]
 
-    # --- 3) best 근처 군집만 남기기 (거리 기반)
-    # 거리 정규화를 위해 unit-space로 변환
+    # 3) 축별 bbox (+ pad), bounds에 클램프. 폭이 0이면 소폭 확장
     width = (hi - lo)
-    u_pts = (pts - lo) / np.maximum(width, 1e-12)
-    x_best = X_hist[np.argmin(chi2_hist)]
-    u_best = (x_best - lo) / np.maximum(width, 1e-12)
-
-    dist = np.linalg.norm(u_pts - u_best[None, :], axis=1)  # L2 in unit space
-    order = np.argsort(dist)
-    n_keep = max(int(np.ceil(component_frac * u_pts.shape[0])), max(2*d, 20))
-    tight_pts = pts[order[:n_keep], :]
-
-    # --- 4) 분위수 기반 박스 + pad (bounds 클램프)
-    q_lo, q_hi = q_clip
-    q_lo = float(q_lo); q_hi = float(q_hi)
-    box_lo0 = np.quantile(tight_pts, q_lo, axis=0)
-    box_hi0 = np.quantile(tight_pts, q_hi, axis=0)
-
-    # pad는 전체 폭 대비 비율
-    box_lo = np.maximum(lo, box_lo0 - width * float(pad))
-    box_hi = np.minimum(hi, box_hi0 + width * float(pad))
-
+    box_lo = np.maximum(lo, np.min(pts, axis=0) - width*float(pad))
+    box_hi = np.minimum(hi, np.max(pts, axis=0) + width*float(pad))
     # zero-width 보정
     epsw = 1e-9 + 0.01 * width
-    tight_axis = (box_hi - box_lo) < 1e-12
-    box_lo[tight_axis] = np.maximum(lo[tight_axis], box_lo[tight_axis] - 0.5*epsw[tight_axis])
-    box_hi[tight_axis] = np.minimum(hi[tight_axis], box_hi[tight_axis] + 0.5*epsw[tight_axis])
-
+    tight = (box_hi - box_lo) < 1e-12
+    box_lo[tight] = np.maximum(lo[tight], box_lo[tight] - 0.5*epsw[tight])
+    box_hi[tight] = np.minimum(hi[tight], box_hi[tight] + 0.5*epsw[tight])
     box = np.vstack([box_lo, box_hi]).T  # (d,2)
 
-    # --- 5) 박스 내부 균일 샘플 + GP 예측
+    # 4) 박스 내부 균일 샘플 & GP 예측
     S = rng.uniform(low=box_lo, high=box_hi, size=(int(n_samples), d))
+    # 배치 예측(여기선 S만 예측하므로 배치 분할 불필요하지만 인터페이스 유지)
     mu_s, std_s = model.predict(S, return_std=True)
     mu_s = np.asarray(mu_s).reshape(-1); std_s = np.asarray(std_s).reshape(-1)
     chi2_mean_s = np.exp(-mu_s + 0.5*std_s*std_s) - float(eps)
@@ -527,7 +509,6 @@ def levelset_region_sampling(model, bounds, param_order,
 
     return {"outfile": outfile, "box": box, "n_kept_for_box": int(pts.shape[0]),
             "threshold": thr}
-
 
 # ------------------------------
 # Restart helper
