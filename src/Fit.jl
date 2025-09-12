@@ -284,11 +284,15 @@ out = levelset_region_sampling(
     GP, bounds, param_order,
     chi2_min=chi2_min,   # 생략해도 chi2s.min() 사용
     delta=delta,               # 원하는 값으로
-    n_samples=10000,
+    n_samples=500,
     X_hist=X, chi2_hist=chi2s,
     q=None,                  # 저장값을 기대값 기준으로. 보수적이면 0.95 등
     seed=_seed,
-    outfile=fig_name + "_levelset_samples.npz",
+    outfile=fig_name + "_levelset_samples_ps.npz",
+    posterior = True
+    n_funcs = 400,
+    posterior_seed = _seed,
+    save_all_draws = False
 )
 print("[LevelSet] saved:", out["outfile"])
 print("[LevelSet] box (lo,hi) per dim:\n", out["box"])
