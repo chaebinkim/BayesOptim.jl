@@ -431,114 +431,161 @@ def pairwise_heatmap_plot(model, bounds, param_order, x_fixed,
 # ------------------------------
 def levelset_region_sampling(model, bounds, param_order,
                              chi2_min=None, delta=1.0,
-                             n_samples=500,           # 저장할 샘플 수
-                             X_hist=None, chi2_hist=None,  # 관측 이력 (필수)
+                             n_samples=500,                 # 저장할 샘플 수
+                             X_hist=None, chi2_hist=None,   # 관측 이력 (필수)
                              eps=1e-12, seed=None, pad=0.02,
                              outfile="posterior_levelset_samples.npz",
-                             # --- new: posterior sampling 옵션 ---
-                             posterior=False,         # True면 포스터리어 샘플링 사용
-                             n_funcs=400,             # 함수 실현 개수
-                             posterior_seed=None,     # 샘플링 시드(재현성)
-                             save_all_draws=False,    # True면 모든 실현(큰 파일!) 저장
-                             q=None, batch=5000):
+                             # --- posterior sampling 옵션 ---
+                             posterior=False,               # True면 포스터리어 샘플링
+                             n_funcs=400,                   # 함수 실현 개수
+                             posterior_seed=None,           # 샘플링 시드
+                             save_all_draws=False,          # 모든 실현 저장(큰 파일!)
+                             q=None, batch=5000,
+                             # --- 안정성/재현성/커버리지 옵션 ---
+                             include_topK=5,                # 관측 상위 K(작은 χ²) 점을 S에 포함 (0이면 비활성)
+                             min_pts_factor=5,              # 폴백 시 최소 필요 표본 크기의 계수
+                             quantile_box=None):            # (q_lo,q_hi) 지정시 분위수 박스 사용
     """
     레벨셋 박스는 관측 이력으로 정의(χ² ≤ chi2_min+δ). 박스 안에서 균일 샘플 S를 뽑아:
       - posterior=False: plug-in/mean 기반 χ² 추정
-      - posterior=True : 노이즈-프리 포스터리어에서 함수 실현 Y ~ N(μ,Σ) 샘플링 → χ² 분포 요약 저장
+      - posterior=True : 노이즈-프리 포스터리어(잠재함수)에서 MVN 샘플링 → χ² 요약 저장
 
-    저장(.npz):
-      samples (N,d)
-      box (d,2)
-      posterior=False → chi2_plugin, chi2_mean
-      posterior=True  → chi2_ps_median, chi2_ps_mean, chi2_ps_q05, chi2_ps_q95, chi2_ps_min
-                         (옵션 save_all_draws=True → chi2_draws (N, n_funcs))
-      메타 숫자 필드(Unicode 문자열 없음)
+    저장(.npz)에는 숫자 배열만 사용해 Unicode dtype 문제를 회피.
     """
     import numpy as np
 
     if X_hist is None or chi2_hist is None:
-        raise ValueError("X_hist와 chi2_hist를 제공해야 합니다 (관측 이력 기반 박스).")
+        raise ValueError("X_hist와 chi2_hist를 제공해야 합니다.")
 
     rng = np.random.default_rng(seed)
     d = len(param_order)
     lo = np.array([bounds[p][0] for p in param_order], dtype=float)
     hi = np.array([bounds[p][1] for p in param_order], dtype=float)
+    width = (hi - lo)
+
+    # --- 이력 & 유효값 필터 ---
     X_hist = np.asarray(X_hist, dtype=float).reshape(-1, d)
     chi2_hist = np.asarray(chi2_hist, dtype=float).reshape(-1)
+    valid = np.isfinite(chi2_hist)
+    if not np.any(valid):
+        raise ValueError("chi2_hist에 유효한 값이 없습니다 (모두 NaN/Inf).")
+    Xv = X_hist[valid]
+    cv = chi2_hist[valid]
+    N = Xv.shape[0]
 
-    # 1) 임계값: 관측데이터에서의 최솟값 + δ
-    cmin = np.min(chi2_hist) if (chi2_min is None) else float(chi2_min)
-    thr = float(cmin) + float(delta)
+    # --- 임계값 ---
+    cmin_data = np.min(cv) if (chi2_min is None) else float(chi2_min)
+    thr = float(cmin_data) + float(delta)
 
-    # 2) 임계 이내 관측점 선택
-    mask = (chi2_hist <= thr) & np.isfinite(chi2_hist)
-    pts = X_hist[mask]
-    if pts.shape[0] < max(2*d, 5):
-        K = max(3*max(2*d, 5), min(2000, X_hist.shape[0]))
-        idx = np.argpartition(chi2_hist, K)[:K]
-        pts = X_hist[idx]
+    # --- 임계 이내 관측점 ---
+    mask = (cv <= thr)
+    pts = Xv[mask]
 
-    # 3) 축별 bbox (+ pad), bounds 클램프
-    width = (hi - lo)
-    box_lo = np.maximum(lo, np.min(pts, axis=0) - width*float(pad))
-    box_hi = np.minimum(hi, np.max(pts, axis=0) + width*float(pad))
+    # --- 폴백: 임계 이내가 너무 적으면 상위 K개로 대체(안전한 K/kth 계산) ---
+    min_need = max(2*d, min_pts_factor*d)  # 차원 대비 충분한 표본
+    if pts.shape[0] < min_need:
+        K_raw = max(min_need, min(2000, N))
+        K = int(min(K_raw, N))                   # K ≤ N
+        kth = max(1, min(K-1, N-1))              # 1..N-1
+        idx = np.argpartition(cv, kth)[:K]
+        pts = Xv[idx]
+
+    # --- 박스 산정: 분위수 박스 or min/max 박스 ---
+    if quantile_box is not None:
+        q_lo, q_hi = float(quantile_box[0]), float(quantile_box[1])
+        box_lo0 = np.quantile(pts, q_lo, axis=0)
+        box_hi0 = np.quantile(pts, q_hi, axis=0)
+    else:
+        box_lo0 = np.min(pts, axis=0)
+        box_hi0 = np.max(pts, axis=0)
+
+    box_lo = np.maximum(lo, box_lo0 - width*float(pad))
+    box_hi = np.minimum(hi, box_hi0 + width*float(pad))
+
+    # zero-width 보정
     epsw = 1e-9 + 0.01 * width
     tight = (box_hi - box_lo) < 1e-12
     box_lo[tight] = np.maximum(lo[tight], box_lo[tight] - 0.5*epsw[tight])
     box_hi[tight] = np.minimum(hi[tight], box_hi[tight] + 0.5*epsw[tight])
     box = np.vstack([box_lo, box_hi]).T  # (d,2)
 
-    # 4) 박스 내부 균일 샘플
+    # --- 박스 내부 균일 샘플 ---
     S = rng.uniform(low=box_lo, high=box_hi, size=(int(n_samples), d))
 
-    # 5) χ² 계산
+    # (선택) 관측 상위 K개를 포함시켜 최적 근방 커버리지 보장
+    if include_topK and include_topK > 0:
+        k = int(min(include_topK, N))
+        top_idx = np.argsort(cv)[:k]
+        S = np.vstack([S, Xv[top_idx]])
+    S = S.astype(np.float64, copy=False)
+
+    # --- χ² 계산 / 저장용 dict ---
     out = {
-        "samples": S.astype(np.float64),
+        "samples": S,
         "box": box.astype(np.float64),
-        "chi2_min": float(cmin),
+        "chi2_min": float(cmin_data),
         "delta": float(delta),
         "threshold": float(thr),
-        "n_samples": int(n_samples),
+        "n_samples": int(S.shape[0]),
         "posterior": int(bool(posterior)),
         "n_funcs": int(n_funcs if posterior else 0),
         "seed": int(seed) if (seed is not None) else -1,
         "posterior_seed": int(posterior_seed) if (posterior_seed is not None) else -1,
         "save_all_draws": int(bool(save_all_draws)),
+        "include_topK": int(include_topK),
     }
 
     if not posterior:
-        # ------- plug-in/mean 기반 (기존 방식) -------
-        mu_s, std_s = model.predict(S, return_std=True)
-        mu_s = np.asarray(mu_s).reshape(-1); std_s = np.asarray(std_s).reshape(-1)
+        # ------- plug-in/mean 기반 -------
+        try:
+            mu_s, std_s = model.predict(S, return_std=True)
+            mu_s = np.asarray(mu_s).reshape(-1)
+            std_s = np.asarray(std_s).reshape(-1)
+        except TypeError:
+            # return_std 미지원 시 폴백(평균만)
+            mu_s = np.asarray(model.predict(S)).reshape(-1)
+            std_s = np.zeros_like(mu_s)
+
         chi2_plugin = np.exp(-mu_s) - float(eps)                      # median/plug-in
         chi2_mean   = np.exp(-mu_s + 0.5*std_s*std_s) - float(eps)    # E[χ²]
         out["chi2_plugin"] = chi2_plugin.astype(np.float64)
         out["chi2_mean"]   = chi2_mean.astype(np.float64)
 
     else:
-        # ------- 포스터리어 샘플링 (노이즈-프리, return_cov=True) -------
-        # 공분산 수치안정화(jitter) 루프
-        mu, cov = model.predict(S, return_cov=True)  # UnitSpaceGP가 지원해야 함
-        mu = np.asarray(mu, dtype=float).reshape(-1)
-        cov = np.asarray(cov, dtype=float)
+        # ------- 포스터리어 샘플링 (노이즈-프리) -------
+        # return_cov 미지원 시 안전 폴백: 독립 가우시안 근사
+        cov_supported = True
+        try:
+            mu, cov = model.predict(S, return_cov=True)
+            mu = np.asarray(mu, dtype=float).reshape(-1)
+            cov = np.asarray(cov, dtype=float)
+        except TypeError:
+            cov_supported = False
+            mu, std = model.predict(S, return_std=True)
+            mu = np.asarray(mu, dtype=float).reshape(-1)
+            std = np.asarray(std, dtype=float).reshape(-1)
 
-        ok = False
         rng_ps = np.random.default_rng(posterior_seed)
-        for k in range(6):
-            try:
-                YS = rng_ps.multivariate_normal(mean=mu, cov=cov, size=int(n_funcs))  # (n_funcs, N)
-                ok = True
-                break
-            except np.linalg.LinAlgError:
-                jitter = (10.0**k) * 1e-10
-                cov = cov + jitter * np.eye(cov.shape[0], dtype=float)
-        if not ok:
-            # 최후의 수단: 대각선만 사용
-            std = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        if cov_supported:
+            # 수치안정화: 대각선 평균을 스케일로 지터 증가
+            diag = np.clip(np.diag(cov), 0.0, None)
+            base = float(np.mean(diag) + 1e-16)
+            ok = False
+            for ktry in range(7):
+                try:
+                    YS = rng_ps.multivariate_normal(mean=mu, cov=cov, size=int(n_funcs))
+                    ok = True
+                    break
+                except np.linalg.LinAlgError:
+                    cov = cov + (10.0**ktry) * (1e-12 + 1e-6*base) * np.eye(cov.shape[0], dtype=float)
+            if not ok:
+                std = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+                YS = mu[None, :] + std[None, :] * rng_ps.standard_normal(size=(int(n_funcs), mu.size))
+        else:
+            # 독립 근사
             YS = mu[None, :] + std[None, :] * rng_ps.standard_normal(size=(int(n_funcs), mu.size))
 
-        CH = np.maximum(np.exp(-YS) - float(eps), 0.0)   # (n_funcs, N)
-        # 요약 통계(축=0: 함수 실현)
+        CH = np.maximum(np.exp(-YS) - float(eps), 0.0)   # (n_funcs, N_tot)
         chi2_ps_mean   = np.mean(CH, axis=0)
         chi2_ps_median = np.median(CH, axis=0)
         chi2_ps_q05    = np.quantile(CH, 0.05, axis=0)
@@ -552,10 +599,8 @@ def levelset_region_sampling(model, bounds, param_order,
         out["chi2_ps_min"]    = chi2_ps_min.astype(np.float64)
 
         if save_all_draws:
-            # (N, n_funcs)로 저장 — 파일 커질 수 있음!
-            out["chi2_draws"] = CH.T.astype(np.float64)
+            out["chi2_draws"] = CH.T.astype(np.float64)  # (N_tot, n_funcs)
 
-    # 6) 저장(숫자만 저장 → Unicode dtype 문제 없음)
     np.savez(outfile, **out)
     return {"outfile": outfile, "box": box, "n_kept_for_box": int(pts.shape[0]),
             "threshold": thr}
