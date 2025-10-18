@@ -1,6 +1,6 @@
 function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "chi2", ref_point = nothing,
              delta = 1.0, plateau_rel = 1e-3, pi_threshold = 0.1, plateau_window = 8,
-             xi_boost = 1.8, xi_max = 0.06)
+             xi_boost = 1.8, xi_max = 0.06, hyper_reopt_interval = 0)
     DIR = @__DIR__
     @pyinclude(DIR*"/Bopt.py")
     py"""
@@ -37,6 +37,7 @@ pi_threshold = float($pi_threshold)
 plateau_window = int($plateau_window)
 xi_boost = float($xi_boost)
 xi_max = float($xi_max)
+hyper_reopt_interval = int($hyper_reopt_interval)
 
 # ---- Candidate / duplicate helpers ----
 def dynamic_n_candidates(L):
@@ -156,13 +157,33 @@ xi0, xi_min, decay = 0.02, 0.001, 0.6  # Lower initial xi for expensive objectiv
 xi = xi0
 plateau, W = 0, int(plateau_window)
 plateau_trigger = 3
+base_optimizer = GP.model.optimizer
+base_restarts = getattr(GP.model, "n_restarts_optimizer", 0)
+reopt_interval = max(0, int(hyper_reopt_interval))
 
 # ---- Main loop ----
 for idx in range(start, max_iter + 1):
     print(f"Bayesian Opt Step :: {idx}")
 
     # Fit GP
+    iter_count = idx - start + 1
+    if reopt_interval > 0:
+        reopt_now = ((iter_count - 1) % reopt_interval == 0)
+    else:
+        reopt_now = (iter_count == 1)
+
+    if reopt_now:
+        GP.model.optimizer = base_optimizer
+        GP.model.n_restarts_optimizer = base_restarts
+    else:
+        GP.model.optimizer = None
+        GP.model.n_restarts_optimizer = 0
+
     GP.fit(X, y)
+
+    if not reopt_now:
+        GP.model.optimizer = None
+        GP.model.n_restarts_optimizer = 0
 
     # Trust-region dict
     tr = None if (len(y) < 2) else {'L': L, 'auto_center': True}
@@ -259,6 +280,10 @@ for idx in range(start, max_iter + 1):
         xi = min(xi_max, xi_base * xi_boost)
     else:
         xi = xi_base
+    if plateau >= plateau_trigger:
+        if L < 0.6:
+            L = 0.6
+        succ, fail = 0, 0
 
     # ---- Logging & diagnostics
     log_progress(file_name, fig_name, param_order, idx_list, X, chi2s, y, sep=SEP)
