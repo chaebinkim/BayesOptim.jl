@@ -92,18 +92,21 @@ def _sample_candidates(bounds, param_order, n_cand=4096, trust_region=None, rng=
         - 'L'        : side length in unit space (0< L <=1)
         - 'center_u' : 1D array in [0,1]^d specifying TR centre in unit space
     """
+    d = len(param_order)
     if rng is None:
         rng = np.random.default_rng()
-    d = len(param_order)
+    seed = int(np.uint32(rng.integers(0, 2 ** 32 - 1))) if rng is not None else None
+    sampler = qmc.Sobol(d=d, scramble=True, seed=seed)
+    U = sampler.random(int(n_cand))
     if trust_region is None:
-        U = rng.random((int(n_cand), d))
+        U = np.asarray(U, dtype=float)
     else:
         L = float(trust_region.get("L", 1.0))
         L = max(1e-6, min(1.0, L))
         center_u = np.asarray(trust_region["center_u"], dtype=float).reshape(-1)
         if center_u.size != d:
             raise ValueError("center_u size mismatch.")
-        U = center_u + (rng.random((int(n_cand), d)) - 0.5) * L
+        U = center_u + (np.asarray(U, dtype=float) - 0.5) * L
         U = np.clip(U, 0.0, 1.0)
     XR = from_unit_batch(bounds, param_order, U)
     return XR, U

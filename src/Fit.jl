@@ -1,4 +1,6 @@
-function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "chi2", ref_point = nothing, delta = 1.0, plateau_rel = 1e-4, pi_threshold = 0.1)
+function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "chi2", ref_point = nothing,
+             delta = 1.0, plateau_rel = 1e-3, pi_threshold = 0.1, plateau_window = 8,
+             xi_boost = 1.8, xi_max = 0.06)
     DIR = @__DIR__
     @pyinclude(DIR*"/Bopt.py")
     py"""
@@ -32,6 +34,32 @@ ref_point = $ref_point
 delta = $delta
 plateau_rel = float($plateau_rel)
 pi_threshold = float($pi_threshold)
+plateau_window = int($plateau_window)
+xi_boost = float($xi_boost)
+xi_max = float($xi_max)
+
+# ---- Candidate / duplicate helpers ----
+def dynamic_n_candidates(L):
+    if L <= 0.10:
+        return 2000
+    if L <= 0.20:
+        return 3000
+    return 5120
+
+
+def random_sample(bounds, param_order, rng):
+    return np.array([[rng.uniform(bounds[p][0], bounds[p][1]) for p in param_order]], dtype=float)
+
+
+def is_duplicate(x_new, X_existing, bounds, param_order, tol=1e-3):
+    if X_existing is None or len(X_existing) == 0:
+        return False, -1
+    xu_new = to_unit_batch(bounds, param_order, x_new).reshape(-1)
+    xu_exist = to_unit_batch(bounds, param_order, X_existing)
+    dists = np.linalg.norm(xu_exist - xu_new, axis=1)
+    idx = int(np.argmin(dists))
+    return bool(dists[idx] <= float(tol)), idx
+
 
 # ---- Seeds for reproducibility ----
 seed_base = 12345                    # 전체 고정 시드 베이스
@@ -126,7 +154,8 @@ fail_th = 2  # Slower contraction trigger
 # ---- Adaptive EI exploration rate (more conservative initially) ----
 xi0, xi_min, decay = 0.02, 0.001, 0.6  # Lower initial xi for expensive objectives
 xi = xi0
-plateau, W = 0, 12   # Longer window for plateau detection
+plateau, W = 0, int(plateau_window)
+plateau_trigger = 3
 
 # ---- Main loop ----
 for idx in range(start, max_iter + 1):
@@ -137,34 +166,65 @@ for idx in range(start, max_iter + 1):
 
     # Trust-region dict
     tr = None if (len(y) < 2) else {'L': L, 'auto_center': True}
+    main_n = dynamic_n_candidates(L)
+    min_dist = 0.12 if L > 0.2 else 0.08
 
     # --- Decide proposal strategy ---
     force_explore = False
-    if (fail >= fail_th and L <= 0.2) or (plateau >= 3):
+    if (fail >= fail_th and L <= 0.2) or (plateau >= plateau_trigger):
         try:
             pi_far = Global_PI(GP, bounds, param_order, X, y,
-                               delta=1e-3, n_cand=3000, min_dist=0.15, rng=rng)
+                               delta=1e-3, n_cand=main_n, min_dist=min_dist, rng=rng)
             force_explore = (pi_far >= pi_threshold)
         except Exception:
             force_explore = True
 
     # Propose next point
     if force_explore and len(y) >= 5:
+        explore_n = max(3000, main_n)
         if (idx % 2) == 0:
             x_next = Propose_Thompson(GP, bounds, param_order, X=X,
-                                      n_cand=5000, min_dist=0.15, rng=rng)
+                                      n_cand=explore_n, min_dist=min_dist, rng=rng)
         else:
             x_next = Propose_MaxStd(GP, bounds, param_order, X=X,
-                                    n_cand=5000, min_dist=0.15, rng=rng)
+                                    n_cand=explore_n, min_dist=min_dist, rng=rng)
         x_next = x_next.reshape(1, -1)
     else:
         x_next = Opt_Acquisition(
             X, y, GP, bounds=bounds,
-            explore=xi, n_cand=5120, k_refine=10,  # More candidates & refinements
+            explore=xi, n_cand=main_n, k_refine=10,
             param_order=param_order, trust_region=tr,
-            rng=rng, min_dist=0.12
+            rng=rng, min_dist=min_dist
         )
         x_next = x_next.reshape(1, -1)
+
+    # Avoid duplicate evaluations
+    dup_attempts = 0
+    while True:
+        duplicate, _ = is_duplicate(x_next, X, bounds, param_order, tol=5e-4)
+        if not duplicate:
+            break
+        dup_attempts += 1
+        if dup_attempts >= 6:
+            x_next = random_sample(bounds, param_order, rng)
+            break
+        if dup_attempts % 2 == 1:
+            x_new = Propose_MaxStd(GP, bounds, param_order, X=X,
+                                   n_cand=max(3000, main_n), min_dist=min_dist, rng=rng)
+        else:
+            boosted_xi = min(xi_max, max(xi, xi_min * 1.5) * 1.1)
+            x_new = Opt_Acquisition(
+                X, y, GP, bounds=bounds,
+                explore=boosted_xi, n_cand=main_n, k_refine=10,
+                param_order=param_order, trust_region=tr,
+                rng=rng, min_dist=min_dist
+            )
+        x_next = np.asarray(x_new, dtype=float).reshape(1, -1)
+
+    duplicate, dup_idx = is_duplicate(x_next, X, bounds, param_order, tol=5e-4)
+    if duplicate:
+        print("[Duplicate] candidate already evaluated; skipping objective call.")
+        continue
 
     # ---- Evaluate objective ----
     params = {"ID": idx}
@@ -194,7 +254,11 @@ for idx in range(start, max_iter + 1):
             plateau += 1
         else:
             plateau = max(0, plateau - 1)
-    xi = max(xi_min, xi0 * (decay ** plateau))
+    xi_base = max(xi_min, xi0 * (decay ** plateau))
+    if plateau >= plateau_trigger:
+        xi = min(xi_max, xi_base * xi_boost)
+    else:
+        xi = xi_base
 
     # ---- Logging & diagnostics
     log_progress(file_name, fig_name, param_order, idx_list, X, chi2s, y, sep=SEP)
@@ -221,5 +285,3 @@ run_postprocessing(
 
 """
 end
-
-
