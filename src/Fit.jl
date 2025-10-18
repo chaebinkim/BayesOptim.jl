@@ -1,4 +1,4 @@
-function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "chi2", ref_point = nothing, delta = 1.0)
+function Fit(Objective, interval, max_iter; file_name = "Bopt_Log", fig_name = "chi2", ref_point = nothing, delta = 1.0, plateau_rel = 1e-4, pi_threshold = 0.1)
     DIR = @__DIR__
     @pyinclude(DIR*"/Bopt.py")
     py"""
@@ -30,6 +30,8 @@ file_name = $file_name
 fig_name = $fig_name
 ref_point = $ref_point
 delta = $delta
+plateau_rel = float($plateau_rel)
+pi_threshold = float($pi_threshold)
 
 # ---- Seeds for reproducibility ----
 seed_base = 12345                    # 전체 고정 시드 베이스
@@ -71,12 +73,20 @@ try:
 except Exception:
     pass
 
-# ---- Initial design ----
+# ---- Initial design with Latin Hypercube Sampling ----
 if start == 1:
-    print("Initial Run")
-    n_init = max(1, min(10, 2*d))
+    print("Initial Run with Latin Hypercube Sampling")
+    n_init = max(2, min(15, 3*d))  # Increased initial samples for better coverage
 
-    # Build reference vector (provided or midpoints)
+    # Use LHS for better space-filling design
+    try:
+        X_lhs = latin_hypercube_sampling(bounds, param_order, n_samples=n_init-1, seed=_seed)
+    except Exception as e:
+        print(f"LHS failed: {e}, using random sampling")
+        X_lhs = np.array([[rng.uniform(bounds[p][0], bounds[p][1]) for p in param_order] 
+                         for _ in range(n_init-1)], dtype=float)
+
+    # Build reference vector
     ref_vec = np.zeros((1, d), dtype=float)
     for j, p in enumerate(param_order):
         lo, hi = bounds[p]
@@ -89,13 +99,7 @@ if start == 1:
             v = 0.5*(lo + hi)  # midpoint if not provided
         ref_vec[0, j] = v
 
-    # Fill remaining random initial points (if any)
-    m = max(0, n_init - 1)
-    if m > 0:
-        Xrand = np.array([[rng.uniform(bounds[p][0], bounds[p][1]) for p in param_order] for _ in range(m)], dtype=float)
-        X0 = np.vstack([ref_vec, Xrand])
-    else:
-        X0 = ref_vec
+    X0 = np.vstack([ref_vec, X_lhs])
 
     # Evaluate initial design
     y0_list, chi20_list = [], []
@@ -112,17 +116,17 @@ if start == 1:
     idx_list = np.arange(1, n_init+1).reshape(-1, 1)
     start = n_init + 1
 
-# ---- Trust-region state (TuRBO-lite) ----
-L = 0.8      # side length in unit space
-L_min = 0.05 # below this, reset to global
+# ---- Trust-region state (more aggressive) ----
+L = 0.9      # Start larger for expensive objectives
+L_min = 0.05
 succ, fail = 0, 0
-succ_th = 3
-fail_th = 3
+succ_th = 2  # Faster expansion trigger
+fail_th = 2  # Slower contraction trigger
 
-# ---- Adaptive EI exploration rate ----
-xi0, xi_min, decay = 0.05, 0.005, 0.5
+# ---- Adaptive EI exploration rate (more conservative initially) ----
+xi0, xi_min, decay = 0.02, 0.001, 0.6  # Lower initial xi for expensive objectives
 xi = xi0
-plateau, W = 0, 10   # plateau counter over a window of W
+plateau, W = 0, 12   # Longer window for plateau detection
 
 # ---- Main loop ----
 for idx in range(start, max_iter + 1):
@@ -134,168 +138,88 @@ for idx in range(start, max_iter + 1):
     # Trust-region dict
     tr = None if (len(y) < 2) else {'L': L, 'auto_center': True}
 
-    # --- Decide proposal (EI vs forced exploration) ---
+    # --- Decide proposal strategy ---
     force_explore = False
-    if (fail >= fail_th and L <= 0.2) or (plateau >= 2):
+    if (fail >= fail_th and L <= 0.2) or (plateau >= 3):
         try:
             pi_far = Global_PI(GP, bounds, param_order, X, y,
                                delta=1e-3, n_cand=3000, min_dist=0.15, rng=rng)
-            force_explore = (pi_far >= 0.10)
+            force_explore = (pi_far >= pi_threshold)
         except Exception:
             force_explore = True
 
+    # Propose next point
     if force_explore and len(y) >= 5:
         if (idx % 2) == 0:
             x_next = Propose_Thompson(GP, bounds, param_order, X=X,
-                                      n_cand=4000, min_dist=0.15, rng=rng)
+                                      n_cand=5000, min_dist=0.15, rng=rng)
         else:
             x_next = Propose_MaxStd(GP, bounds, param_order, X=X,
-                                    n_cand=4000, min_dist=0.15, rng=rng)
+                                    n_cand=5000, min_dist=0.15, rng=rng)
+        x_next = x_next.reshape(1, -1)
     else:
         x_next = Opt_Acquisition(
             X, y, GP, bounds=bounds,
-            explore=xi, n_cand=4096, k_refine=8,
+            explore=xi, n_cand=5120, k_refine=10,  # More candidates & refinements
             param_order=param_order, trust_region=tr,
-            rng=rng, min_dist=0.10
+            rng=rng, min_dist=0.12
         )
+        x_next = x_next.reshape(1, -1)
 
-    # ---- Evaluate objective
+    # ---- Evaluate objective ----
     params = {"ID": idx}
-    for i, p in enumerate(param_order):
-        params[p] = float(x_next[0, i])
-    chi2_next = $Objective(params)
-    y_next = chi2_to_y(chi2_next)
+    for j, p in enumerate(param_order):
+        params[p] = float(x_next[0, j])
+    chi2_val = sanitize_chi2($Objective(params))
+    y_val = chi2_to_y(chi2_val)
 
     # ---- Update datasets
     X = np.vstack([X, x_next])
-    y = np.append(y, y_next)
-    idx_list = np.vstack([idx_list, [idx]])
-    chi2s.append(float(sanitize_chi2(chi2_next)))
+    y = np.append(y, y_val)
+    idx_list = np.vstack([idx_list, np.array([[idx]], dtype=int)])
+    chi2s.append(float(chi2_val))
 
-    # ---- Success / fail logic
+    # ---- Success / fail logic (more aggressive)
     i_best = int(np.argmax(y[:-1])) if len(y) > 1 else 0
-    improved = (y_next > y[i_best] + 1e-6)
-    if improved:
-        succ += 1; fail = 0
-        L = min(1.0, L * 1.5)  # expand region on success
-        if succ >= succ_th:
-            L = min(1.0, L * 1.2); succ = 0
-    else:
-        fail += 1; succ = 0
-        if fail >= fail_th:
-            L *= 0.5; fail = 0
-    if L < L_min:
-        L = 0.8; succ, fail = 0, 0  # reset to global
+    improved = (y_val > y[i_best] + 1e-6)
+    
+    L, succ, fail = update_trust_region_aggressive(L, succ, fail, improved, 
+                                                   succ_th=succ_th, fail_th=fail_th)
 
-    # ---- Adaptive xi update (plateau detection)
+    # ---- Adaptive xi update
     if len(chi2s) >= W + 1:
         best_prev = np.min(chi2s[:-W]); best_now = np.min(chi2s)
         rel = (best_prev - best_now) / (best_prev + 1e-12)
-        if rel < 1e-3:    # <0.1% improvement over window
+        if rel < plateau_rel:
             plateau += 1
         else:
             plateau = max(0, plateau - 1)
     xi = max(xi_min, xi0 * (decay ** plateau))
 
-    # ---- Logging (CSV)
-    data = np.hstack([idx_list, X, np.array(chi2s).reshape(-1,1), y.reshape(-1,1)])
-    header = ["ID"] + param_order + ["Chi2", "Y"]
-    df = pd.DataFrame(data, columns=header)
-    df["ID"] = df["ID"].astype(int)
-    df.to_csv(file_name + ".csv", sep=SEP, index=False)
-
-    # ---- Plots
-    # 1) Chi2 vs iteration
-    fig, ax = plt.subplots(layout='constrained')
-    iters = np.arange(1, len(chi2s) + 1)
-    ax.scatter(iters, chi2s, s=70)
-    imin = int(np.argmin(chi2s)) + 1
-    ax.scatter(imin, np.min(chi2s), marker='*', s=200)
-    ax.set_xlabel('Idx', fontsize=15)
-    ax.set_ylabel(r'$\chi^2$', fontsize=15)
-    ax.set_title(f"Minimum is Idx = {imin}", fontsize=20)
-    ax.grid(True); ax.set_axisbelow(True)
-    fig.savefig(fig_name + "_vs_Idx.png"); plt.close(fig)
-
-    # 2) Chi2 vs parameters
-    fig, axs = plt.subplots(1, X.shape[1], figsize=(3*X.shape[1], 3), layout='constrained')
-    if X.shape[1] == 1:
-        axs = [axs]
-    for i in range(X.shape[1]):
-        axs[i].scatter(X[:, i], chi2s, s=40)
-        pbest = X[np.argmin(chi2s), i]
-        ybest = np.min(chi2s)
-        axs[i].scatter(pbest, ybest, marker='*', s=200)
-        axs[i].set_xlabel(param_order[i], fontsize=10)
-        axs[i].set_ylabel(r'$\chi^2$', fontsize=10)
-        axs[i].set_title(f"Min at {param_order[i]} = {pbest:.5f}", fontsize=10)
-        axs[i].grid(True); axs[i].set_axisbelow(True)
-    fig.align_labels()
-    fig.savefig(fig_name + "_vs_params.png"); plt.close(fig)
+    # ---- Logging & diagnostics
+    log_progress(file_name, fig_name, param_order, idx_list, X, chi2s, y, sep=SEP)
     
 if len(y) >= 2 and not hasattr(GP.model, "X_train_"):
     GP.fit(X, y)
     
-# ---- Posterior sampling uncertainty (ONLY at the very end)
-try:
-    post_seed = int(rng.integers(1, 2**31-1))   # per-run random seed
-    tr_final = {'L': L, 'auto_center': True} if len(y) > 2 else None
-    summary = optimal_std_via_sampling(
-        GP, bounds, param_order,
-        X=X, y=y,
-        n_funcs=500,
-        n_cand=5000,
-        trust_region=None,
-        eps=1e-12,
-        posterior_seed=post_seed,   # << 고정 시드
-        noise_free=True,           # << 노이즈-프리 공분산
-        global_scope=True,         # << 전역 스코프 샘플링
-    )
-
-    print("[Uncertainty@final] y* std=%.4g  chi2* std=%.4g" % (summary["y_star_std"], summary["chi2_star_std"]))
-    with open(file_name + "_uncert.json", "w") as f:
-        json.dump({k:(v.tolist() if hasattr(v,'tolist') else v) for k,v in summary.items()}, f)
-except Exception as e:
-    print("[Uncertainty@final] sampling failed:", e)
-
-# ---- Pairwise heatmaps (E[chi2] and PI) at the very end
-try:
-    ib = int(np.argmin(chi2s))
-    x_best = {p: float(X[ib, k]) for k, p in enumerate(param_order)}
-
-    # Expected chi^2 maps (smooth landscape)
-    pairwise_heatmap_plot(
-        GP, bounds, param_order, x_best,
-        pairs=None,        # or e.g. [("J3","J4"), ("J3","Jnnn")]
-        grid_n=80,
-        mode="Echi2",
-        X_hist=X, chi2_hist=chi2s,
-        out_prefix=fig_name + "_pair",
-        save_data = True, data_format="npz", save_hist = False,
-    )
-
-    print("[Pairwise] heatmaps saved with prefix:", fig_name + "_pair")
-except Exception as e:
-    print("[Pairwise] plotting failed:", e)
-
-# ---- 레벨셋 샘플링 & 저장 ----
-chi2_min = float(np.min(chi2s))
-out = levelset_region_sampling(
-    GP, bounds, param_order,
-    chi2_min=chi2_min,   # 생략해도 chi2s.min() 사용
-    delta=delta,               # 원하는 값으로
-    n_samples=10000,
-    X_hist=X, chi2_hist=chi2s,
-    q=None,                  # 저장값을 기대값 기준으로. 보수적이면 0.95 등
-    seed=_seed,
-    outfile=fig_name + "_levelset_samples_ps.npz",
-    posterior = True,
-    n_funcs = 400,
-    posterior_seed = _seed,
-    save_all_draws = False
+run_postprocessing(
+    GP, bounds, param_order, X, y, chi2s, fig_name,
+    rng=rng,
+    uncertainty_kwargs={"n_funcs": 500, "n_cand": 5000},
+    heatmap_kwargs={"pairs": None},
+    levelset_kwargs={
+        "delta": delta,
+        "n_samples": 10000,
+        "q": None,
+        "seed": _seed,
+        "posterior": True,
+        "n_funcs": 400,
+        "posterior_seed": _seed,
+        "save_all_draws": False,
+    },
 )
-print("[LevelSet] saved:", out["outfile"])
-print("[LevelSet] box (lo,hi) per dim:\n", out["box"])
+
 """
 end
+
 
